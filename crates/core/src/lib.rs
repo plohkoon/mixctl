@@ -1,14 +1,9 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+use serde::{Deserialize, Serialize};
+pub mod dbus;
+pub mod api;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct State {
+    pub connected: bool,
+    pub active_profile: String
 }
