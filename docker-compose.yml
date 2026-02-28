@@ -1,0 +1,52 @@
+services:
+  dbus:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    command: ["/workspace/docker/dbus-entrypoint.sh"]
+    volumes:
+      - ./:/workspace
+      - bus:/bus
+
+  daemon:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    working_dir: /workspace
+    environment:
+      - DBUS_SESSION_BUS_ADDRESS=unix:path=/bus/session-bus
+      - RUST_LOG=info
+    depends_on:
+      - dbus
+    volumes:
+      - ./:/workspace
+      - bus:/bus
+    command:
+      - cargo
+      - run
+      - -p
+      - mixctl-daemon
+
+  cli:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    working_dir: /workspace
+    environment:
+      - DBUS_SESSION_BUS_ADDRESS=unix:path=/bus/session-bus
+    depends_on:
+      - dbus
+    volumes:
+      - ./:/workspace
+      - bus:/bus
+    # default command; you’ll override this per-invocation
+    command:
+      - cargo
+      - run
+      - -p
+      - mixctl-cli
+      - --
+      - status
+
+volumes:
+  bus:

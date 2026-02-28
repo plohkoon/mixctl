@@ -1,0 +1,14 @@
+FROM rust:1-bookworm
+
+# Basic build deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    dbus dbus-user-session pkg-config \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# Speed up rebuilds a bit
+ENV CARGO_TERM_COLOR=always
