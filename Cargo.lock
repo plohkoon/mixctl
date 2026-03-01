@@ -676,7 +676,6 @@ dependencies = [
  "anyhow",
  "clap",
  "mixctl-core",
- "serde_json",
  "tokio",
  "zbus",
 ]
@@ -687,6 +686,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "zbus",
+ "zvariant",
 ]
 
 [[package]]
@@ -696,7 +696,6 @@ dependencies = [
  "anyhow",
  "mixctl-core",
  "serde",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

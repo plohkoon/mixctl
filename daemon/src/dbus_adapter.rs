@@ -1,20 +1,20 @@
-use mixctl_core::api::MixCtlApi;
+use mixctl_core::State;
 use zbus::interface;
 
 use crate::service::Service;
 
 #[interface(name = "dev.greghuber.MixCtl1")]
 impl Service {
-    fn ping(&self) -> String {
-        <Self as MixCtlApi>::ping(self)
+    async fn ping(&self) -> zbus::fdo::Result<String> {
+        Ok("pong".to_string())
     }
 
-    fn get_state_json(&self) -> String {
-        let state = <Self as MixCtlApi>::get_state(self);
-        serde_json::to_string(&state).unwrap()
+    async fn get_state(&self) -> zbus::fdo::Result<State> {
+        Ok(self.state.lock().await.clone())
     }
 
-    fn set_profile(&self, name: &str) {
-        <Self as MixCtlApi>::set_profile(self, name.to_string())
+    async fn set_profile(&self, name: &str) -> zbus::fdo::Result<()> {
+        self.state.lock().await.active_profile = name.to_string();
+        Ok(())
     }
 }

@@ -29,8 +29,9 @@ async fn main() -> Result<()> {
             println!("{resp}");
         }
         Cmd::Status => {
-            let json = proxy.get_state_json().await?;
-            println!("{json}");
+            let state = proxy.get_state().await?;
+            println!("connected:      {}", state.connected);
+            println!("active_profile: {}", state.active_profile);
         }
         Cmd::SetProfile { name } => {
             proxy.set_profile(&name).await?;

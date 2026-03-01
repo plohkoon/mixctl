@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
+use zvariant::Type;
 pub mod dbus;
-pub mod api;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct State {
     pub connected: bool,
-    pub active_profile: String
+    pub active_profile: String,
 }
