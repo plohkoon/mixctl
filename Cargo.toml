@@ -5,4 +5,5 @@ members = [
   "cli",
   "probe",
   "crates/core",
+  "crates/protocol",
 ]

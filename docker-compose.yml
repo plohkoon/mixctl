@@ -45,6 +45,22 @@ services:
       - target:/target
     command: ["cargo", "run", "-p", "mixctl-cli", "--", "status"]
 
+#  monitor:
+#    image: debian:bookworm-slim
+#    environment:
+#      - DBUS_SESSION_BUS_ADDRESS=unix:path=/bus/session-bus
+#    depends_on:
+#      - dbus
+#    volumes:
+#      - bus:/bus
+#    profiles: [debug]
+#    command:
+#      [
+#        "sh",
+#        "-c",
+#        "apt-get update -qq && apt-get install -y -qq dbus >/dev/null 2>&1 && dbus-monitor --session",
+#      ]
+
 volumes:
   bus:
   cargo:
