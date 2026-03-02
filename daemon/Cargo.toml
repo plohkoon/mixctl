@@ -6,8 +6,10 @@ edition = "2024"
 [dependencies]
 mixctl-core = { path = "../crates/core" }
 zbus = "4"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+toml = "0.8"
+dirs = "6"

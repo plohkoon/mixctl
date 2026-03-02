@@ -1,18 +1,42 @@
+use std::sync::Arc;
+
+use mixctl_core::ChannelInfo;
 use tokio::sync::Mutex;
 
-use mixctl_core::State;
+use crate::config::{ChannelConfig, ConfigFile};
+use crate::state::{ChannelState, StateFile};
 
+#[derive(Clone)]
 pub struct Service {
-    pub(crate) state: Mutex<State>,
+    pub(crate) inner: Arc<Mutex<Shared>>,
+}
+
+pub struct Shared {
+    pub config: ConfigFile,
+    pub state: StateFile,
+    pub config_dirty: bool,
+    pub state_dirty: bool,
 }
 
 impl Service {
-    pub fn new() -> Self {
+    pub fn new(config: ConfigFile, state: StateFile) -> Self {
         Self {
-            state: Mutex::new(State {
-                connected: false,
-                active_profile: "default".to_string(),
-            }),
+            inner: Arc::new(Mutex::new(Shared {
+                config,
+                state,
+                config_dirty: false,
+                state_dirty: false,
+            })),
+        }
+    }
+
+    pub fn build_channel_info(cfg: &ChannelConfig, state: &ChannelState) -> ChannelInfo {
+        ChannelInfo {
+            id: cfg.id(),
+            name: cfg.name.clone(),
+            color: cfg.color.clone(),
+            muted: state.muted,
+            volume: state.volume,
         }
     }
 }
