@@ -16,9 +16,10 @@ pub trait MixCtl {
     fn get_channel(&self, id: u32) -> zbus::Result<ChannelInfo>;
 
     // Channel config mutations
-    fn add_channel(&self, id: u32, name: &str, color: &str) -> zbus::Result<()>;
+    fn add_channel(&self, name: &str, color: &str) -> zbus::Result<u32>;
     fn remove_channel(&self, id: u32) -> zbus::Result<()>;
     fn set_channel_name(&self, id: u32, name: &str) -> zbus::Result<()>;
+    fn move_channel(&self, id: u32, position: u32) -> zbus::Result<()>;
     fn set_channel_color(&self, id: u32, color: &str) -> zbus::Result<()>;
 
     // Channel state mutations

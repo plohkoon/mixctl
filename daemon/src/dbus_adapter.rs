@@ -31,18 +31,14 @@ impl Service {
         Ok(Service::build_channel_info(cfg, &st))
     }
 
-    async fn add_channel(&self, id: u32, name: &str, color: &str) -> zbus::fdo::Result<()> {
+    async fn add_channel(&self, name: &str, color: &str) -> zbus::fdo::Result<u32> {
         if parse_hex_color(color).is_none() {
             return Err(zbus::fdo::Error::InvalidArgs(
                 format!("invalid hex color '{}'", color),
             ));
         }
         let mut shared = self.inner.lock().await;
-        if shared.config.find_channel(id).is_some() {
-            return Err(zbus::fdo::Error::Failed(
-                format!("channel id {} already exists", id),
-            ));
-        }
+        let id = shared.config.next_unused_id();
         shared.config.channels.push(crate::config::ChannelConfig {
             id: Some(id),
             name: name.to_string(),
@@ -51,7 +47,7 @@ impl Service {
         shared.state.ensure_channel(id);
         shared.config_dirty = true;
         shared.state_dirty = true;
-        Ok(())
+        Ok(id)
     }
 
     async fn remove_channel(&self, id: u32) -> zbus::fdo::Result<()> {
@@ -67,6 +63,23 @@ impl Service {
         }
         shared.config_dirty = true;
         shared.state_dirty = true;
+        Ok(())
+    }
+
+    async fn move_channel(&self, id: u32, position: u32) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        let from = shared.config.channels.iter().position(|c| c.id() == id)
+            .ok_or_else(|| zbus::fdo::Error::Failed(format!("channel id {} not found", id)))?;
+        let len = shared.config.channels.len();
+        let to = position as usize;
+        if to >= len {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                format!("position {} out of range (0..{})", position, len - 1),
+            ));
+        }
+        let ch = shared.config.channels.remove(from);
+        shared.config.channels.insert(to, ch);
+        shared.config_dirty = true;
         Ok(())
     }
 

@@ -32,9 +32,11 @@ enum ChannelCmd {
     /// Get a channel by ID
     Get { id: u32 },
     /// Add a new channel
-    Add { id: u32, name: String, color: String },
+    Add { name: String, color: String },
     /// Remove a channel
     Remove { id: u32 },
+    /// Move a channel to a position in the list (0-indexed)
+    Move { id: u32, position: u32 },
     /// Set a channel's name
     SetName { id: u32, name: String },
     /// Set a channel's color
@@ -84,12 +86,16 @@ async fn main() -> Result<()> {
                 println!("muted:  {}", ch.muted);
                 println!("volume: {}", ch.volume);
             }
-            ChannelCmd::Add { id, name, color } => {
-                proxy.add_channel(id, &name, &color).await?;
-                println!("ok");
+            ChannelCmd::Add { name, color } => {
+                let id = proxy.add_channel(&name, &color).await?;
+                println!("ok (id={})", id);
             }
             ChannelCmd::Remove { id } => {
                 proxy.remove_channel(id).await?;
+                println!("ok");
+            }
+            ChannelCmd::Move { id, position } => {
+                proxy.move_channel(id, position).await?;
                 println!("ok");
             }
             ChannelCmd::SetName { id, name } => {
