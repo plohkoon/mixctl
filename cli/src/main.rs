@@ -3,6 +3,14 @@ use clap::{Parser, Subcommand};
 use mixctl_core::dbus::MixCtlProxy;
 use zbus::Connection;
 
+fn parse_bool(s: &str) -> Result<bool, String> {
+    match s.to_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(format!("expected true/false, got '{s}'")),
+    }
+}
+
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
@@ -41,8 +49,8 @@ enum ChannelCmd {
     SetName { id: u32, name: String },
     /// Set a channel's color
     SetColor { id: u32, color: String },
-    /// Set a channel's mute state
-    SetMute { id: u32, muted: bool },
+    /// Set a channel's mute state (true/false)
+    SetMute { id: u32, muted: String },
     /// Set a channel's volume (0-100)
     SetVolume { id: u32, volume: u8 },
 }
@@ -107,6 +115,8 @@ async fn main() -> Result<()> {
                 println!("ok");
             }
             ChannelCmd::SetMute { id, muted } => {
+                let muted = parse_bool(&muted)
+                    .map_err(|e| anyhow::anyhow!(e))?;
                 proxy.set_channel_mute(id, muted).await?;
                 println!("ok");
             }
