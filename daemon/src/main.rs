@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load config (creates with defaults if missing)
     let config = ConfigFile::load_or_create()?;
-    info!("loaded config with {} channels", config.channels.len());
+    info!("loaded config with {} inputs and {} outputs", config.inputs.len(), config.outputs.len());
 
     // Load state and reconcile with config
     let mut state = StateFile::load()?;

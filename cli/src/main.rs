@@ -21,10 +21,20 @@ struct Args {
 enum Cmd {
     /// Ping the daemon
     Ping,
-    /// Channel management
-    Channel {
+    /// Input management
+    Input {
         #[command(subcommand)]
-        cmd: ChannelCmd,
+        cmd: InputCmd,
+    },
+    /// Output management
+    Output {
+        #[command(subcommand)]
+        cmd: OutputCmd,
+    },
+    /// Route management (input→output routing)
+    Route {
+        #[command(subcommand)]
+        cmd: RouteCmd,
     },
     /// Page management
     Page {
@@ -39,34 +49,64 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
-enum ChannelCmd {
-    /// List all channels
+enum InputCmd {
+    /// List all inputs
     List,
-    /// Get a channel by ID
+    /// Get an input by ID
     Get { id: u32 },
-    /// Add a new channel
+    /// Add a new input
     Add { name: String, color: String },
-    /// Remove a channel
+    /// Remove an input
     Remove { id: u32 },
-    /// Move a channel to a position in the list (0-indexed)
+    /// Move an input to a position in the list (0-indexed)
     Move { id: u32, position: u32 },
-    /// Set a channel's name
+    /// Set an input's name
     SetName { id: u32, name: String },
-    /// Set a channel's color
+    /// Set an input's color
     SetColor { id: u32, color: String },
-    /// Set a channel's mute state (true/false)
-    SetMute { id: u32, muted: String },
-    /// Set a channel's volume (0-100)
+}
+
+#[derive(Subcommand)]
+enum OutputCmd {
+    /// List all outputs
+    List,
+    /// Get an output by ID
+    Get { id: u32 },
+    /// Add a new output (copies routes from source_output_id, use 0 for defaults)
+    Add { name: String, color: String, source_output_id: u32 },
+    /// Remove an output
+    Remove { id: u32 },
+    /// Move an output to a position in the list (0-indexed)
+    Move { id: u32, position: u32 },
+    /// Set an output's name
+    SetName { id: u32, name: String },
+    /// Set an output's color
+    SetColor { id: u32, color: String },
+    /// Set an output's volume (0-100)
     SetVolume { id: u32, volume: u8 },
+    /// Set an output's mute state (true/false)
+    SetMute { id: u32, muted: String },
+}
+
+#[derive(Subcommand)]
+enum RouteCmd {
+    /// Get a route (input→output)
+    Get { input_id: u32, output_id: u32 },
+    /// List all routes for an output
+    List { output_id: u32 },
+    /// Set a route's volume (0-100)
+    SetVolume { input_id: u32, output_id: u32, volume: u8 },
+    /// Set a route's mute state (true/false)
+    SetMute { input_id: u32, output_id: u32, muted: String },
 }
 
 #[derive(Subcommand)]
 enum ListenCmd {
     /// Listen for all signals
     All,
-    /// Listen for channel state changes (volume/mute)
+    /// Listen for state changes (output volume/mute + route changes)
     State,
-    /// Listen for channel config changes (add/remove/reorder/rename/color)
+    /// Listen for config changes (inputs + outputs)
     Config,
     /// Listen for page changes
     Page,
@@ -92,53 +132,116 @@ async fn main() -> Result<()> {
             let resp = proxy.ping().await?;
             println!("{resp}");
         }
-        Cmd::Channel { cmd } => match cmd {
-            ChannelCmd::List => {
-                let channels = proxy.list_channels().await?;
-                for ch in channels {
-                    let mute_tag = if ch.muted { " [MUTED]" } else { "" };
+        Cmd::Input { cmd } => match cmd {
+            InputCmd::List => {
+                let inputs = proxy.list_inputs().await?;
+                for inp in inputs {
+                    println!("[{}] {} ({})", inp.id, inp.name, inp.color);
+                }
+            }
+            InputCmd::Get { id } => {
+                let inp = proxy.get_input(id).await?;
+                println!("id:    {}", inp.id);
+                println!("name:  {}", inp.name);
+                println!("color: {}", inp.color);
+            }
+            InputCmd::Add { name, color } => {
+                let id = proxy.add_input(&name, &color).await?;
+                println!("ok (id={})", id);
+            }
+            InputCmd::Remove { id } => {
+                proxy.remove_input(id).await?;
+                println!("ok");
+            }
+            InputCmd::Move { id, position } => {
+                proxy.move_input(id, position).await?;
+                println!("ok");
+            }
+            InputCmd::SetName { id, name } => {
+                proxy.set_input_name(id, &name).await?;
+                println!("ok");
+            }
+            InputCmd::SetColor { id, color } => {
+                proxy.set_input_color(id, &color).await?;
+                println!("ok");
+            }
+        },
+        Cmd::Output { cmd } => match cmd {
+            OutputCmd::List => {
+                let outputs = proxy.list_outputs().await?;
+                for out in outputs {
+                    let mute_tag = if out.muted { " [MUTED]" } else { "" };
                     println!(
                         "[{}] {} ({}) vol={}{mute_tag}",
-                        ch.id, ch.name, ch.color, ch.volume
+                        out.id, out.name, out.color, out.volume
                     );
                 }
             }
-            ChannelCmd::Get { id } => {
-                let ch = proxy.get_channel(id).await?;
-                println!("id:     {}", ch.id);
-                println!("name:   {}", ch.name);
-                println!("color:  {}", ch.color);
-                println!("muted:  {}", ch.muted);
-                println!("volume: {}", ch.volume);
+            OutputCmd::Get { id } => {
+                let out = proxy.get_output(id).await?;
+                println!("id:     {}", out.id);
+                println!("name:   {}", out.name);
+                println!("color:  {}", out.color);
+                println!("volume: {}", out.volume);
+                println!("muted:  {}", out.muted);
             }
-            ChannelCmd::Add { name, color } => {
-                let id = proxy.add_channel(&name, &color).await?;
+            OutputCmd::Add { name, color, source_output_id } => {
+                let id = proxy.add_output(&name, &color, source_output_id).await?;
                 println!("ok (id={})", id);
             }
-            ChannelCmd::Remove { id } => {
-                proxy.remove_channel(id).await?;
+            OutputCmd::Remove { id } => {
+                proxy.remove_output(id).await?;
                 println!("ok");
             }
-            ChannelCmd::Move { id, position } => {
-                proxy.move_channel(id, position).await?;
+            OutputCmd::Move { id, position } => {
+                proxy.move_output(id, position).await?;
                 println!("ok");
             }
-            ChannelCmd::SetName { id, name } => {
-                proxy.set_channel_name(id, &name).await?;
+            OutputCmd::SetName { id, name } => {
+                proxy.set_output_name(id, &name).await?;
                 println!("ok");
             }
-            ChannelCmd::SetColor { id, color } => {
-                proxy.set_channel_color(id, &color).await?;
+            OutputCmd::SetColor { id, color } => {
+                proxy.set_output_color(id, &color).await?;
                 println!("ok");
             }
-            ChannelCmd::SetMute { id, muted } => {
+            OutputCmd::SetVolume { id, volume } => {
+                proxy.set_output_volume(id, volume).await?;
+                println!("ok");
+            }
+            OutputCmd::SetMute { id, muted } => {
                 let muted = parse_bool(&muted)
                     .map_err(|e| anyhow::anyhow!(e))?;
-                proxy.set_channel_mute(id, muted).await?;
+                proxy.set_output_mute(id, muted).await?;
                 println!("ok");
             }
-            ChannelCmd::SetVolume { id, volume } => {
-                proxy.set_channel_volume(id, volume).await?;
+        },
+        Cmd::Route { cmd } => match cmd {
+            RouteCmd::Get { input_id, output_id } => {
+                let route = proxy.get_route(input_id, output_id).await?;
+                println!("input_id:  {}", route.input_id);
+                println!("output_id: {}", route.output_id);
+                println!("volume:    {}", route.volume);
+                println!("muted:     {}", route.muted);
+            }
+            RouteCmd::List { output_id } => {
+                let routes = proxy.list_routes_for_output(output_id).await?;
+                for r in routes {
+                    let mute_tag = if r.muted { " [MUTED]" } else { "" };
+                    println!(
+                        "input={} → output={} vol={}{mute_tag}",
+                        r.input_id, r.output_id, r.volume
+                    );
+                }
+            }
+            RouteCmd::SetVolume { input_id, output_id, volume } => {
+                proxy.set_route_volume(input_id, output_id, volume).await?;
+                println!("ok");
+            }
+            RouteCmd::SetMute { input_id, output_id, muted } => {
+                let muted = parse_bool(&muted)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                proxy.set_route_mute(input_id, output_id, muted).await?;
                 println!("ok");
             }
         },
@@ -147,22 +250,40 @@ async fn main() -> Result<()> {
 
             match cmd {
                 ListenCmd::All => {
-                    let mut state_stream = proxy.receive_channel_state_changed().await?;
-                    let mut config_stream = proxy.receive_channels_config_changed().await?;
+                    let mut output_state_stream = proxy.receive_output_state_changed().await?;
+                    let mut route_stream = proxy.receive_route_changed().await?;
+                    let mut inputs_config_stream = proxy.receive_inputs_config_changed().await?;
+                    let mut outputs_config_stream = proxy.receive_outputs_config_changed().await?;
                     let mut page_stream = proxy.receive_page_changed().await?;
                     loop {
                         futures_lite::future::or(
                             futures_lite::future::or(
-                                async {
-                                    if let Some(signal) = state_stream.next().await {
-                                        print_state_signal(&proxy, signal.args().unwrap().id).await;
-                                    }
-                                },
-                                async {
-                                    if let Some(_) = config_stream.next().await {
-                                        print_config_signal(&proxy).await;
-                                    }
-                                },
+                                futures_lite::future::or(
+                                    async {
+                                        if let Some(signal) = output_state_stream.next().await {
+                                            let id = signal.args().unwrap().id;
+                                            print_output_state_signal(&proxy, id).await;
+                                        }
+                                    },
+                                    async {
+                                        if let Some(signal) = route_stream.next().await {
+                                            let args = signal.args().unwrap();
+                                            print_route_signal(&proxy, args.input_id, args.output_id).await;
+                                        }
+                                    },
+                                ),
+                                futures_lite::future::or(
+                                    async {
+                                        if let Some(_) = inputs_config_stream.next().await {
+                                            print_inputs_config_signal(&proxy).await;
+                                        }
+                                    },
+                                    async {
+                                        if let Some(_) = outputs_config_stream.next().await {
+                                            print_outputs_config_signal(&proxy).await;
+                                        }
+                                    },
+                                ),
                             ),
                             async {
                                 if let Some(signal) = page_stream.next().await {
@@ -175,15 +296,43 @@ async fn main() -> Result<()> {
                     }
                 }
                 ListenCmd::State => {
-                    let mut stream = proxy.receive_channel_state_changed().await?;
-                    while let Some(signal) = stream.next().await {
-                        print_state_signal(&proxy, signal.args().unwrap().id).await;
+                    let mut output_state_stream = proxy.receive_output_state_changed().await?;
+                    let mut route_stream = proxy.receive_route_changed().await?;
+                    loop {
+                        futures_lite::future::or(
+                            async {
+                                if let Some(signal) = output_state_stream.next().await {
+                                    let id = signal.args().unwrap().id;
+                                    print_output_state_signal(&proxy, id).await;
+                                }
+                            },
+                            async {
+                                if let Some(signal) = route_stream.next().await {
+                                    let args = signal.args().unwrap();
+                                    print_route_signal(&proxy, args.input_id, args.output_id).await;
+                                }
+                            },
+                        )
+                        .await;
                     }
                 }
                 ListenCmd::Config => {
-                    let mut stream = proxy.receive_channels_config_changed().await?;
-                    while let Some(_) = stream.next().await {
-                        print_config_signal(&proxy).await;
+                    let mut inputs_stream = proxy.receive_inputs_config_changed().await?;
+                    let mut outputs_stream = proxy.receive_outputs_config_changed().await?;
+                    loop {
+                        futures_lite::future::or(
+                            async {
+                                if let Some(_) = inputs_stream.next().await {
+                                    print_inputs_config_signal(&proxy).await;
+                                }
+                            },
+                            async {
+                                if let Some(_) = outputs_stream.next().await {
+                                    print_outputs_config_signal(&proxy).await;
+                                }
+                            },
+                        )
+                        .await;
                     }
                 }
                 ListenCmd::Page => {
@@ -210,31 +359,56 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn print_state_signal(proxy: &MixCtlProxy<'_>, id: u32) {
-    match proxy.get_channel(id).await {
-        Ok(ch) => {
-            let mute_tag = if ch.muted { " [MUTED]" } else { "" };
+async fn print_output_state_signal(proxy: &MixCtlProxy<'_>, id: u32) {
+    match proxy.get_output(id).await {
+        Ok(out) => {
+            let mute_tag = if out.muted { " [MUTED]" } else { "" };
             println!(
-                "channel_state_changed: [{}] {} vol={}{mute_tag}",
-                ch.id, ch.name, ch.volume
+                "output_state_changed: [{}] {} vol={}{mute_tag}",
+                out.id, out.name, out.volume
             );
         }
-        Err(e) => println!("channel_state_changed: id={id} (fetch failed: {e})"),
+        Err(e) => println!("output_state_changed: id={id} (fetch failed: {e})"),
     }
 }
 
-async fn print_config_signal(proxy: &MixCtlProxy<'_>) {
-    match proxy.list_channels().await {
-        Ok(channels) => {
-            println!("channels_config_changed: {} channels", channels.len());
-            for ch in channels {
-                let mute_tag = if ch.muted { " [MUTED]" } else { "" };
+async fn print_route_signal(proxy: &MixCtlProxy<'_>, input_id: u32, output_id: u32) {
+    match proxy.get_route(input_id, output_id).await {
+        Ok(r) => {
+            let mute_tag = if r.muted { " [MUTED]" } else { "" };
+            println!(
+                "route_changed: input={} → output={} vol={}{mute_tag}",
+                r.input_id, r.output_id, r.volume
+            );
+        }
+        Err(e) => println!("route_changed: input={input_id} output={output_id} (fetch failed: {e})"),
+    }
+}
+
+async fn print_inputs_config_signal(proxy: &MixCtlProxy<'_>) {
+    match proxy.list_inputs().await {
+        Ok(inputs) => {
+            println!("inputs_config_changed: {} inputs", inputs.len());
+            for inp in inputs {
+                println!("  [{}] {} ({})", inp.id, inp.name, inp.color);
+            }
+        }
+        Err(e) => println!("inputs_config_changed: (fetch failed: {e})"),
+    }
+}
+
+async fn print_outputs_config_signal(proxy: &MixCtlProxy<'_>) {
+    match proxy.list_outputs().await {
+        Ok(outputs) => {
+            println!("outputs_config_changed: {} outputs", outputs.len());
+            for out in outputs {
+                let mute_tag = if out.muted { " [MUTED]" } else { "" };
                 println!(
                     "  [{}] {} ({}) vol={}{mute_tag}",
-                    ch.id, ch.name, ch.color, ch.volume
+                    out.id, out.name, out.color, out.volume
                 );
             }
         }
-        Err(e) => println!("channels_config_changed: (fetch failed: {e})"),
+        Err(e) => println!("outputs_config_changed: (fetch failed: {e})"),
     }
 }

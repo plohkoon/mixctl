@@ -9,7 +9,8 @@ use tracing::warn;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigFile {
     pub version: u32,
-    pub channels: Vec<ChannelConfig>,
+    pub inputs: Vec<ChannelConfig>,
+    pub outputs: Vec<ChannelConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,11 +33,17 @@ impl Default for ConfigFile {
     fn default() -> Self {
         Self {
             version: 1,
-            channels: vec![
+            inputs: vec![
                 ChannelConfig { id: Some(1), name: "System".into(), color: "#4A90D9".into() },
                 ChannelConfig { id: Some(2), name: "Game".into(), color: "#E74C3C".into() },
                 ChannelConfig { id: Some(3), name: "Music".into(), color: "#2ECC71".into() },
                 ChannelConfig { id: Some(4), name: "Chat".into(), color: "#F39C12".into() },
+            ],
+            outputs: vec![
+                ChannelConfig { id: Some(5), name: "Personal Mix".into(), color: "#8E44AD".into() },
+                ChannelConfig { id: Some(6), name: "Voice Chat Mix".into(), color: "#3498DB".into() },
+                ChannelConfig { id: Some(7), name: "Audience Mix".into(), color: "#E67E22".into() },
+                ChannelConfig { id: Some(8), name: "VOD Track".into(), color: "#1ABC9C".into() },
             ],
         }
     }
@@ -72,11 +79,12 @@ impl ConfigFile {
         }
     }
 
-    /// Assign IDs to any channels missing one, and deduplicate.
+    /// Assign IDs to any entries missing one, and deduplicate.
+    /// Shared ID space across both inputs and outputs.
     fn fixup_ids(&mut self) {
         let mut seen = HashSet::new();
-        for ch in &mut self.channels {
-            match ch.id {
+        for entry in self.inputs.iter_mut().chain(self.outputs.iter_mut()) {
+            match entry.id {
                 Some(id) if id > 0 && seen.insert(id) => {
                     // valid unique id, keep it
                 }
@@ -84,20 +92,20 @@ impl ConfigFile {
                     // duplicate or zero
                     let new_id = next_unused_id(&seen);
                     warn!(
-                        "channel '{}' has duplicate/invalid id {}, reassigning to {}",
-                        ch.name, id, new_id
+                        "'{}' has duplicate/invalid id {}, reassigning to {}",
+                        entry.name, id, new_id
                     );
                     seen.insert(new_id);
-                    ch.id = Some(new_id);
+                    entry.id = Some(new_id);
                 }
                 None => {
                     let new_id = next_unused_id(&seen);
                     warn!(
-                        "channel '{}' missing id, assigning {}",
-                        ch.name, new_id
+                        "'{}' missing id, assigning {}",
+                        entry.name, new_id
                     );
                     seen.insert(new_id);
-                    ch.id = Some(new_id);
+                    entry.id = Some(new_id);
                 }
             }
         }
@@ -115,21 +123,32 @@ impl ConfigFile {
         Ok(())
     }
 
-    pub fn find_channel(&self, id: u32) -> Option<&ChannelConfig> {
-        self.channels.iter().find(|c| c.id() == id)
+    pub fn find_input(&self, id: u32) -> Option<&ChannelConfig> {
+        self.inputs.iter().find(|c| c.id() == id)
     }
 
-    pub fn find_channel_mut(&mut self, id: u32) -> Option<&mut ChannelConfig> {
-        self.channels.iter_mut().find(|c| c.id() == id)
+    pub fn find_input_mut(&mut self, id: u32) -> Option<&mut ChannelConfig> {
+        self.inputs.iter_mut().find(|c| c.id() == id)
+    }
+
+    pub fn find_output(&self, id: u32) -> Option<&ChannelConfig> {
+        self.outputs.iter().find(|c| c.id() == id)
+    }
+
+    pub fn find_output_mut(&mut self, id: u32) -> Option<&mut ChannelConfig> {
+        self.outputs.iter_mut().find(|c| c.id() == id)
     }
 
     pub fn next_unused_id(&self) -> u32 {
-        let used: HashSet<u32> = self.channels.iter().map(|c| c.id()).collect();
+        let used: HashSet<u32> = self.inputs.iter()
+            .chain(self.outputs.iter())
+            .map(|c| c.id())
+            .collect();
         next_unused_id(&used)
     }
 
     pub fn max_page(&self) -> u32 {
-        let n = self.channels.len() as u32;
+        let n = self.inputs.len() as u32;
         if n == 0 { 0 } else { (n - 1) / 4 }
     }
 }

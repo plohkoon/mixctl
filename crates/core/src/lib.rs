@@ -3,12 +3,27 @@ use zvariant::Type;
 pub mod dbus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct ChannelInfo {
+pub struct InputInfo {
     pub id: u32,
     pub name: String,
     pub color: String,
-    pub muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct OutputInfo {
+    pub id: u32,
+    pub name: String,
+    pub color: String,
     pub volume: u8,
+    pub muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct RouteInfo {
+    pub input_id: u32,
+    pub output_id: u32,
+    pub volume: u8,
+    pub muted: bool,
 }
 
 /// Parse a "#RRGGBB" hex color string into (R, G, B) components.
