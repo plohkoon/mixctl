@@ -6,4 +6,6 @@ members = [
   "probe",
   "crates/core",
   "crates/protocol",
+  "ui",
+  "applet",
 ]

@@ -31,6 +31,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PageCmd,
     },
+    /// Listen for daemon signals (runs until interrupted)
+    Listen {
+        #[command(subcommand)]
+        cmd: ListenCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -53,6 +58,18 @@ enum ChannelCmd {
     SetMute { id: u32, muted: String },
     /// Set a channel's volume (0-100)
     SetVolume { id: u32, volume: u8 },
+}
+
+#[derive(Subcommand)]
+enum ListenCmd {
+    /// Listen for all signals
+    All,
+    /// Listen for channel state changes (volume/mute)
+    State,
+    /// Listen for channel config changes (add/remove/reorder/rename/color)
+    Config,
+    /// Listen for page changes
+    Page,
 }
 
 #[derive(Subcommand)]
@@ -125,6 +142,59 @@ async fn main() -> Result<()> {
                 println!("ok");
             }
         },
+        Cmd::Listen { cmd } => {
+            use futures_lite::StreamExt;
+
+            match cmd {
+                ListenCmd::All => {
+                    let mut state_stream = proxy.receive_channel_state_changed().await?;
+                    let mut config_stream = proxy.receive_channels_config_changed().await?;
+                    let mut page_stream = proxy.receive_page_changed().await?;
+                    loop {
+                        futures_lite::future::or(
+                            futures_lite::future::or(
+                                async {
+                                    if let Some(signal) = state_stream.next().await {
+                                        print_state_signal(&proxy, signal.args().unwrap().id).await;
+                                    }
+                                },
+                                async {
+                                    if let Some(_) = config_stream.next().await {
+                                        print_config_signal(&proxy).await;
+                                    }
+                                },
+                            ),
+                            async {
+                                if let Some(signal) = page_stream.next().await {
+                                    let args = signal.args().unwrap();
+                                    println!("page_changed: {}", args.page);
+                                }
+                            },
+                        )
+                        .await;
+                    }
+                }
+                ListenCmd::State => {
+                    let mut stream = proxy.receive_channel_state_changed().await?;
+                    while let Some(signal) = stream.next().await {
+                        print_state_signal(&proxy, signal.args().unwrap().id).await;
+                    }
+                }
+                ListenCmd::Config => {
+                    let mut stream = proxy.receive_channels_config_changed().await?;
+                    while let Some(_) = stream.next().await {
+                        print_config_signal(&proxy).await;
+                    }
+                }
+                ListenCmd::Page => {
+                    let mut stream = proxy.receive_page_changed().await?;
+                    while let Some(signal) = stream.next().await {
+                        let args = signal.args().unwrap();
+                        println!("page_changed: {}", args.page);
+                    }
+                }
+            }
+        }
         Cmd::Page { cmd } => match cmd {
             PageCmd::Get => {
                 let page = proxy.get_current_page().await?;
@@ -138,4 +208,33 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn print_state_signal(proxy: &MixCtlProxy<'_>, id: u32) {
+    match proxy.get_channel(id).await {
+        Ok(ch) => {
+            let mute_tag = if ch.muted { " [MUTED]" } else { "" };
+            println!(
+                "channel_state_changed: [{}] {} vol={}{mute_tag}",
+                ch.id, ch.name, ch.volume
+            );
+        }
+        Err(e) => println!("channel_state_changed: id={id} (fetch failed: {e})"),
+    }
+}
+
+async fn print_config_signal(proxy: &MixCtlProxy<'_>) {
+    match proxy.list_channels().await {
+        Ok(channels) => {
+            println!("channels_config_changed: {} channels", channels.len());
+            for ch in channels {
+                let mute_tag = if ch.muted { " [MUTED]" } else { "" };
+                println!(
+                    "  [{}] {} ({}) vol={}{mute_tag}",
+                    ch.id, ch.name, ch.color, ch.volume
+                );
+            }
+        }
+        Err(e) => println!("channels_config_changed: (fetch failed: {e})"),
+    }
 }

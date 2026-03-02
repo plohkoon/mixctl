@@ -29,4 +29,14 @@ pub trait MixCtl {
     // Page
     fn get_current_page(&self) -> zbus::Result<u32>;
     fn set_current_page(&self, page: u32) -> zbus::Result<()>;
+
+    // Signals
+    #[zbus(signal)]
+    fn channel_state_changed(&self, id: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn channels_config_changed(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn page_changed(&self, page: u32) -> zbus::Result<()>;
 }

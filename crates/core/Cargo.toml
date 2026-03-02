@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-zbus = "4"
-zvariant = "4"
+zbus = "5"
+zvariant = "5"

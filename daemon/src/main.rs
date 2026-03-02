@@ -8,7 +8,7 @@ use std::time::Duration;
 use mixctl_core::dbus::{BUS_NAME, OBJ_PATH};
 use tracing::{info, warn, Level};
 use tracing_subscriber::EnvFilter;
-use zbus::ConnectionBuilder;
+use zbus::connection::Builder as ConnectionBuilder;
 
 use crate::config::ConfigFile;
 use crate::service::Service;

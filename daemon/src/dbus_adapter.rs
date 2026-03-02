@@ -1,5 +1,6 @@
 use mixctl_core::{ChannelInfo, parse_hex_color};
 use zbus::interface;
+use zbus::object_server::SignalEmitter;
 
 use crate::service::Service;
 
@@ -31,7 +32,12 @@ impl Service {
         Ok(Service::build_channel_info(cfg, &st))
     }
 
-    async fn add_channel(&self, name: &str, color: &str) -> zbus::fdo::Result<u32> {
+    async fn add_channel(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        name: &str,
+        color: &str,
+    ) -> zbus::fdo::Result<u32> {
         if parse_hex_color(color).is_none() {
             return Err(zbus::fdo::Error::InvalidArgs(
                 format!("invalid hex color '{}'", color),
@@ -47,10 +53,16 @@ impl Service {
         shared.state.ensure_channel(id);
         shared.config_dirty = true;
         shared.state_dirty = true;
+        drop(shared);
+        Self::channels_config_changed(&emitter).await.ok();
         Ok(id)
     }
 
-    async fn remove_channel(&self, id: u32) -> zbus::fdo::Result<()> {
+    async fn remove_channel(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+    ) -> zbus::fdo::Result<()> {
         let mut shared = self.inner.lock().await;
         let idx = shared.config.channels.iter().position(|c| c.id() == id)
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("channel id {} not found", id)))?;
@@ -63,10 +75,17 @@ impl Service {
         }
         shared.config_dirty = true;
         shared.state_dirty = true;
+        drop(shared);
+        Self::channels_config_changed(&emitter).await.ok();
         Ok(())
     }
 
-    async fn move_channel(&self, id: u32, position: u32) -> zbus::fdo::Result<()> {
+    async fn move_channel(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+        position: u32,
+    ) -> zbus::fdo::Result<()> {
         let mut shared = self.inner.lock().await;
         let from = shared.config.channels.iter().position(|c| c.id() == id)
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("channel id {} not found", id)))?;
@@ -80,19 +99,33 @@ impl Service {
         let ch = shared.config.channels.remove(from);
         shared.config.channels.insert(to, ch);
         shared.config_dirty = true;
+        drop(shared);
+        Self::channels_config_changed(&emitter).await.ok();
         Ok(())
     }
 
-    async fn set_channel_name(&self, id: u32, name: &str) -> zbus::fdo::Result<()> {
+    async fn set_channel_name(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+        name: &str,
+    ) -> zbus::fdo::Result<()> {
         let mut shared = self.inner.lock().await;
         let cfg = shared.config.find_channel_mut(id)
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("channel id {} not found", id)))?;
         cfg.name = name.to_string();
         shared.config_dirty = true;
+        drop(shared);
+        Self::channels_config_changed(&emitter).await.ok();
         Ok(())
     }
 
-    async fn set_channel_color(&self, id: u32, color: &str) -> zbus::fdo::Result<()> {
+    async fn set_channel_color(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+        color: &str,
+    ) -> zbus::fdo::Result<()> {
         if parse_hex_color(color).is_none() {
             return Err(zbus::fdo::Error::InvalidArgs(
                 format!("invalid hex color '{}'", color),
@@ -103,20 +136,34 @@ impl Service {
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("channel id {} not found", id)))?;
         cfg.color = color.to_string();
         shared.config_dirty = true;
+        drop(shared);
+        Self::channels_config_changed(&emitter).await.ok();
         Ok(())
     }
 
-    async fn set_channel_mute(&self, id: u32, muted: bool) -> zbus::fdo::Result<()> {
+    async fn set_channel_mute(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+        muted: bool,
+    ) -> zbus::fdo::Result<()> {
         let mut shared = self.inner.lock().await;
         if shared.config.find_channel(id).is_none() {
             return Err(zbus::fdo::Error::Failed(format!("channel id {} not found", id)));
         }
         shared.state.set_muted(id, muted);
         shared.state_dirty = true;
+        drop(shared);
+        Self::channel_state_changed(&emitter, id).await.ok();
         Ok(())
     }
 
-    async fn set_channel_volume(&self, id: u32, volume: u8) -> zbus::fdo::Result<()> {
+    async fn set_channel_volume(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+        volume: u8,
+    ) -> zbus::fdo::Result<()> {
         if volume > 100 {
             return Err(zbus::fdo::Error::InvalidArgs(
                 format!("volume {} exceeds maximum of 100", volume),
@@ -128,6 +175,8 @@ impl Service {
         }
         shared.state.set_volume(id, volume);
         shared.state_dirty = true;
+        drop(shared);
+        Self::channel_state_changed(&emitter, id).await.ok();
         Ok(())
     }
 
@@ -136,7 +185,11 @@ impl Service {
         Ok(shared.state.current_page)
     }
 
-    async fn set_current_page(&self, page: u32) -> zbus::fdo::Result<()> {
+    async fn set_current_page(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        page: u32,
+    ) -> zbus::fdo::Result<()> {
         let mut shared = self.inner.lock().await;
         let max = shared.config.max_page();
         if page > max {
@@ -146,6 +199,18 @@ impl Service {
         }
         shared.state.current_page = page;
         shared.state_dirty = true;
+        drop(shared);
+        Self::page_changed(&emitter, page).await.ok();
         Ok(())
     }
+
+    // Signals
+    #[zbus(signal)]
+    async fn channel_state_changed(emitter: &SignalEmitter<'_>, id: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn channels_config_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn page_changed(emitter: &SignalEmitter<'_>, page: u32) -> zbus::Result<()>;
 }

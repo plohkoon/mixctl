@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 mixctl-core = { path = "../crates/core" }
-zbus = "4"
+zbus = "5"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
