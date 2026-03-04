@@ -46,6 +46,23 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ListenCmd,
     },
+    /// Audio stream management
+    Stream {
+        #[command(subcommand)]
+        cmd: StreamCmd,
+    },
+    /// App rule management (auto-assign streams to inputs)
+    Rule {
+        #[command(subcommand)]
+        cmd: RuleCmd,
+    },
+    /// Capture device management (hardware inputs)
+    Capture {
+        #[command(subcommand)]
+        cmd: CaptureCmd,
+    },
+    /// Audio status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -64,6 +81,10 @@ enum InputCmd {
     SetName { id: u32, name: String },
     /// Set an input's color
     SetColor { id: u32, color: String },
+    /// Get the default input
+    GetDefault,
+    /// Set the default input (0 to clear)
+    SetDefault { id: u32 },
 }
 
 #[derive(Subcommand)]
@@ -86,6 +107,8 @@ enum OutputCmd {
     SetVolume { id: u32, volume: u8 },
     /// Set an output's mute state (true/false)
     SetMute { id: u32, muted: String },
+    /// Set an output's target hardware device (empty to clear)
+    SetTarget { id: u32, device_name: String },
 }
 
 #[derive(Subcommand)]
@@ -98,6 +121,47 @@ enum RouteCmd {
     SetVolume { input_id: u32, output_id: u32, volume: u8 },
     /// Set a route's mute state (true/false)
     SetMute { input_id: u32, output_id: u32, muted: String },
+}
+
+#[derive(Subcommand)]
+enum StreamCmd {
+    /// List all active audio streams
+    List,
+    /// Assign a stream to an input
+    Assign {
+        /// PipeWire node ID of the stream
+        pw_node_id: u32,
+        /// Input ID to route to
+        input_id: u32,
+        /// Remember this assignment as an app rule
+        #[arg(long)]
+        remember: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuleCmd {
+    /// List all app rules
+    List,
+    /// Set an app rule (add or update)
+    Set { app_name: String, input_id: u32 },
+    /// Remove an app rule
+    Remove { app_name: String },
+}
+
+#[derive(Subcommand)]
+enum CaptureCmd {
+    /// List available hardware capture devices
+    List,
+    /// Add a capture device as a mixer input
+    Add {
+        /// PipeWire node ID of the capture device
+        pw_node_id: u32,
+        /// Name for the new input
+        name: String,
+        /// Color for the new input (#RRGGBB)
+        color: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -132,6 +196,16 @@ async fn main() -> Result<()> {
             let resp = proxy.ping().await?;
             println!("{resp}");
         }
+        Cmd::Status => {
+            let status = proxy.get_audio_status().await?;
+            println!("audio: {status}");
+            let default_input = proxy.get_default_input().await?;
+            if default_input > 0 {
+                println!("default input: {default_input}");
+            } else {
+                println!("default input: (none)");
+            }
+        }
         Cmd::Input { cmd } => match cmd {
             InputCmd::List => {
                 let inputs = proxy.list_inputs().await?;
@@ -163,6 +237,18 @@ async fn main() -> Result<()> {
             }
             InputCmd::SetColor { id, color } => {
                 proxy.set_input_color(id, &color).await?;
+                println!("ok");
+            }
+            InputCmd::GetDefault => {
+                let id = proxy.get_default_input().await?;
+                if id > 0 {
+                    println!("{id}");
+                } else {
+                    println!("(none)");
+                }
+            }
+            InputCmd::SetDefault { id } => {
+                proxy.set_default_input(id).await?;
                 println!("ok");
             }
         },
@@ -215,6 +301,10 @@ async fn main() -> Result<()> {
                 proxy.set_output_mute(id, muted).await?;
                 println!("ok");
             }
+            OutputCmd::SetTarget { id, device_name } => {
+                proxy.set_output_target(id, &device_name).await?;
+                println!("ok");
+            }
         },
         Cmd::Route { cmd } => match cmd {
             RouteCmd::Get { input_id, output_id } => {
@@ -245,6 +335,82 @@ async fn main() -> Result<()> {
                 println!("ok");
             }
         },
+        Cmd::Stream { cmd } => match cmd {
+            StreamCmd::List => {
+                let streams = proxy.list_streams().await?;
+                if streams.is_empty() {
+                    println!("(no active streams)");
+                } else {
+                    for s in streams {
+                        let input_tag = if s.input_id > 0 {
+                            format!("→ input {}", s.input_id)
+                        } else {
+                            "unassigned".to_string()
+                        };
+                        println!(
+                            "[{}] {} - {} ({input_tag})",
+                            s.pw_node_id, s.app_name, s.media_name
+                        );
+                    }
+                }
+            }
+            StreamCmd::Assign {
+                pw_node_id,
+                input_id,
+                remember,
+            } => {
+                proxy.assign_stream(pw_node_id, input_id, remember).await?;
+                println!("ok");
+            }
+        },
+        Cmd::Rule { cmd } => match cmd {
+            RuleCmd::List => {
+                let rules = proxy.list_app_rules().await?;
+                if rules.is_empty() {
+                    println!("(no rules)");
+                } else {
+                    for r in rules {
+                        println!("{} → input {}", r.app_name, r.input_id);
+                    }
+                }
+            }
+            RuleCmd::Set { app_name, input_id } => {
+                proxy.set_app_rule(&app_name, input_id).await?;
+                println!("ok");
+            }
+            RuleCmd::Remove { app_name } => {
+                proxy.remove_app_rule(&app_name).await?;
+                println!("ok");
+            }
+        },
+        Cmd::Capture { cmd } => match cmd {
+            CaptureCmd::List => {
+                let devices = proxy.list_capture_devices().await?;
+                if devices.is_empty() {
+                    println!("(no capture devices)");
+                } else {
+                    for d in devices {
+                        let status = if d.is_added {
+                            format!("added as input {}", d.input_id)
+                        } else {
+                            "available".to_string()
+                        };
+                        println!(
+                            "[{}] {} ({}) - {status}",
+                            d.pw_node_id, d.name, d.device_name
+                        );
+                    }
+                }
+            }
+            CaptureCmd::Add {
+                pw_node_id,
+                name,
+                color,
+            } => {
+                let id = proxy.add_capture_input(pw_node_id, &name, &color).await?;
+                println!("ok (id={})", id);
+            }
+        },
         Cmd::Listen { cmd } => {
             use futures_lite::StreamExt;
 
@@ -255,40 +421,75 @@ async fn main() -> Result<()> {
                     let mut inputs_config_stream = proxy.receive_inputs_config_changed().await?;
                     let mut outputs_config_stream = proxy.receive_outputs_config_changed().await?;
                     let mut page_stream = proxy.receive_page_changed().await?;
+                    let mut streams_stream = proxy.receive_streams_changed().await?;
+                    let mut rules_stream = proxy.receive_app_rules_changed().await?;
+                    let mut capture_stream = proxy.receive_capture_devices_changed().await?;
+                    let mut audio_stream = proxy.receive_audio_status_changed().await?;
                     loop {
                         futures_lite::future::or(
                             futures_lite::future::or(
                                 futures_lite::future::or(
-                                    async {
-                                        if let Some(signal) = output_state_stream.next().await {
-                                            let id = signal.args().unwrap().id;
-                                            print_output_state_signal(&proxy, id).await;
-                                        }
-                                    },
-                                    async {
-                                        if let Some(signal) = route_stream.next().await {
-                                            let args = signal.args().unwrap();
-                                            print_route_signal(&proxy, args.input_id, args.output_id).await;
-                                        }
-                                    },
+                                    futures_lite::future::or(
+                                        async {
+                                            if let Some(signal) = output_state_stream.next().await {
+                                                let id = signal.args().unwrap().id;
+                                                print_output_state_signal(&proxy, id).await;
+                                            }
+                                        },
+                                        async {
+                                            if let Some(signal) = route_stream.next().await {
+                                                let args = signal.args().unwrap();
+                                                print_route_signal(&proxy, args.input_id, args.output_id).await;
+                                            }
+                                        },
+                                    ),
+                                    futures_lite::future::or(
+                                        async {
+                                            if let Some(_) = inputs_config_stream.next().await {
+                                                print_inputs_config_signal(&proxy).await;
+                                            }
+                                        },
+                                        async {
+                                            if let Some(_) = outputs_config_stream.next().await {
+                                                print_outputs_config_signal(&proxy).await;
+                                            }
+                                        },
+                                    ),
                                 ),
                                 futures_lite::future::or(
-                                    async {
-                                        if let Some(_) = inputs_config_stream.next().await {
-                                            print_inputs_config_signal(&proxy).await;
-                                        }
-                                    },
-                                    async {
-                                        if let Some(_) = outputs_config_stream.next().await {
-                                            print_outputs_config_signal(&proxy).await;
-                                        }
-                                    },
+                                    futures_lite::future::or(
+                                        async {
+                                            if let Some(signal) = page_stream.next().await {
+                                                let args = signal.args().unwrap();
+                                                println!("page_changed: {}", args.page);
+                                            }
+                                        },
+                                        async {
+                                            if let Some(_) = streams_stream.next().await {
+                                                println!("streams_changed");
+                                            }
+                                        },
+                                    ),
+                                    futures_lite::future::or(
+                                        async {
+                                            if let Some(_) = rules_stream.next().await {
+                                                println!("app_rules_changed");
+                                            }
+                                        },
+                                        async {
+                                            if let Some(_) = capture_stream.next().await {
+                                                println!("capture_devices_changed");
+                                            }
+                                        },
+                                    ),
                                 ),
                             ),
                             async {
-                                if let Some(signal) = page_stream.next().await {
-                                    let args = signal.args().unwrap();
-                                    println!("page_changed: {}", args.page);
+                                if let Some(_) = audio_stream.next().await {
+                                    match proxy.get_audio_status().await {
+                                        Ok(status) => println!("audio_status_changed: {status}"),
+                                        Err(e) => println!("audio_status_changed: (fetch failed: {e})"),
+                                    }
                                 }
                             },
                         )

@@ -1,9 +1,11 @@
 FROM rust:1-bookworm
 
-# Basic build deps
+# Build deps + PipeWire runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dbus dbus-user-session pkg-config \
     ca-certificates \
+    libpipewire-0.3-dev libclang-dev \
+    pipewire pipewire-pulse wireplumber \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

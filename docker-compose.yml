@@ -8,6 +8,21 @@ services:
       - ./:/workspace
       - bus:/bus
 
+  pipewire:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    command: ["/workspace/docker/pipewire-entrypoint.sh"]
+    environment:
+      - DBUS_SESSION_BUS_ADDRESS=unix:path=/bus/session-bus
+      - XDG_RUNTIME_DIR=/run/pipewire
+    depends_on:
+      - dbus
+    volumes:
+      - ./:/workspace
+      - bus:/bus
+      - pwrun:/run/pipewire
+
   daemon:
     build:
       context: .
@@ -15,14 +30,18 @@ services:
     working_dir: /workspace
     environment:
       - DBUS_SESSION_BUS_ADDRESS=unix:path=/bus/session-bus
+      - PIPEWIRE_RUNTIME_DIR=/run/pipewire
+      - XDG_RUNTIME_DIR=/run/pipewire
       - RUST_LOG=info
       - CARGO_HOME=/cargo
       - CARGO_TARGET_DIR=/target
     depends_on:
       - dbus
+      - pipewire
     volumes:
       - ./:/workspace
       - bus:/bus
+      - pwrun:/run/pipewire
       - cargo:/cargo
       - target:/target
     command: ["cargo", "run", "-p", "mixctl-daemon"]
@@ -45,6 +64,33 @@ services:
       - target:/target
     command: ["cargo", "run", "-p", "mixctl-cli", "--", "status"]
 
+  # Interactive shell for testing — run with: docker compose run --rm shell
+  shell:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    working_dir: /workspace
+    environment:
+      - DBUS_SESSION_BUS_ADDRESS=unix:path=/bus/session-bus
+      - PIPEWIRE_RUNTIME_DIR=/run/pipewire
+      - XDG_RUNTIME_DIR=/run/pipewire
+      - RUST_LOG=info
+      - CARGO_HOME=/cargo
+      - CARGO_TARGET_DIR=/target
+    depends_on:
+      - dbus
+      - pipewire
+    volumes:
+      - ./:/workspace
+      - bus:/bus
+      - pwrun:/run/pipewire
+      - cargo:/cargo
+      - target:/target
+    profiles: [debug]
+    stdin_open: true
+    tty: true
+    entrypoint: /bin/bash
+
   monitor:
     image: debian:bookworm-slim
     environment:
@@ -63,5 +109,6 @@ services:
 
 volumes:
   bus:
+  pwrun:
   cargo:
   target:

@@ -41,16 +41,20 @@ pub(crate) async fn load_routes_for_output(
 }
 
 fn build_route_css(inputs: &[InputInfo]) -> String {
-    inputs
-        .iter()
-        .map(|inp| {
-            format!(
-                ".channel-color-{} {{ background-color: {}; min-height: 6px; border-radius: 3px; }}",
-                inp.id, inp.color
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut css = String::from(
+        ".drop-highlight { outline: 2px dashed @accent_color; outline-offset: -2px; border-radius: 6px; }\n",
+    );
+    for inp in inputs {
+        css.push_str(&format!(
+            ".channel-color-{} {{ background-color: {}; min-height: 6px; border-radius: 3px; }}\n",
+            inp.id, inp.color
+        ));
+        css.push_str(&format!(
+            ".channel-text-{} {{ color: {}; }}\n",
+            inp.id, inp.color
+        ));
+    }
+    css
 }
 
 pub(crate) fn rebuild_route_strips(
@@ -140,6 +144,39 @@ fn build_route_strip(
     let name_label = gtk4::Label::new(Some(&inp.name));
     name_label.add_css_class("heading");
     strip.append(&name_label);
+
+    // Drop target for stream DnD
+    let drop_target = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+    drop_target.connect_drop(clone!(
+        #[strong] proxy,
+        move |_, value, _, _| {
+            if let Ok(pw_node_id_str) = value.get::<String>() {
+                if let Ok(pw_node_id) = pw_node_id_str.parse::<u32>() {
+                    let proxy = proxy.clone();
+                    glib::spawn_future_local(async move {
+                        proxy.assign_stream(pw_node_id, input_id, false).await.ok();
+                    });
+                    return true;
+                }
+            }
+            false
+        }
+    ));
+    drop_target.connect_enter(clone!(
+        #[weak] strip,
+        #[upgrade_or] gtk4::gdk::DragAction::empty(),
+        move |_, _, _| {
+            strip.add_css_class("drop-highlight");
+            gtk4::gdk::DragAction::MOVE
+        }
+    ));
+    drop_target.connect_leave(clone!(
+        #[weak] strip,
+        move |_| {
+            strip.remove_css_class("drop-highlight");
+        }
+    ));
+    strip.add_controller(drop_target);
 
     strips_box.append(&strip);
 

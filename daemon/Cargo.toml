@@ -13,3 +13,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 toml = "0.8"
 dirs = "6"
+pipewire = "0.9"
+glob-match = "0.2"

@@ -26,6 +26,29 @@ pub struct RouteInfo {
     pub muted: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct StreamInfo {
+    pub pw_node_id: u32,
+    pub app_name: String,
+    pub media_name: String,
+    pub input_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct AppRuleInfo {
+    pub app_name: String,
+    pub input_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct CaptureDeviceInfo {
+    pub pw_node_id: u32,
+    pub name: String,
+    pub device_name: String,
+    pub is_added: bool,
+    pub input_id: u32,
+}
+
 /// Parse a "#RRGGBB" hex color string into (R, G, B) components.
 pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     let s = s.strip_prefix('#')?;

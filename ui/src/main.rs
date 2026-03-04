@@ -1,5 +1,8 @@
+mod capture;
 mod dbus;
+mod rules;
 mod sidebar;
+mod streams;
 mod strips;
 
 use std::cell::Cell;
@@ -23,6 +26,26 @@ fn main() -> glib::ExitCode {
 }
 
 fn build_ui(app: &adw::Application) {
+    // -- Status indicator --
+    let status_label = gtk4::Label::new(Some("○"));
+    status_label.add_css_class("error");
+
+    // -- Header bar --
+    let title_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    title_box.set_halign(gtk4::Align::Center);
+    let title = adw::WindowTitle::new("MixCtl", "");
+    title_box.append(&title);
+    title_box.append(&status_label);
+
+    let rules_button = gtk4::Button::with_label("Rules");
+    let devices_button = gtk4::Button::with_label("Devices");
+
+    let header = adw::HeaderBar::builder()
+        .title_widget(&title_box)
+        .build();
+    header.pack_end(&devices_button);
+    header.pack_end(&rules_button);
+
     // -- Sidebar: output list --
     let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     sidebar_box.set_margin_start(8);
@@ -54,16 +77,33 @@ fn build_ui(app: &adw::Application) {
         .child(&strips_box)
         .build();
 
+    // -- Streams panel --
+    let streams_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    streams_box.set_margin_start(12);
+    streams_box.set_margin_end(12);
+    streams_box.set_margin_top(8);
+    streams_box.set_margin_bottom(8);
+    streams_box.set_halign(gtk4::Align::Start);
+
+    let streams_scrolled = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
+        .vscrollbar_policy(gtk4::PolicyType::Never)
+        .child(&streams_box)
+        .build();
+
+    // -- Main vertical layout (strips + streams) --
+    let main_vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    main_vbox.append(&main_scrolled);
+    let streams_sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    main_vbox.append(&streams_sep);
+    main_vbox.append(&streams_scrolled);
+
     // -- Layout --
     let paned = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     let separator = gtk4::Separator::new(gtk4::Orientation::Vertical);
     paned.append(&sidebar_scrolled);
     paned.append(&separator);
-    paned.append(&main_scrolled);
-
-    let header = adw::HeaderBar::builder()
-        .title_widget(&adw::WindowTitle::new("MixCtl", ""))
-        .build();
+    paned.append(&main_vbox);
 
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     content.append(&header);
@@ -73,7 +113,7 @@ fn build_ui(app: &adw::Application) {
         .application(app)
         .title("MixCtl")
         .default_width(750)
-        .default_height(400)
+        .default_height(450)
         .content(&content)
         .build();
 
@@ -89,6 +129,11 @@ fn build_ui(app: &adw::Application) {
     glib::spawn_future_local(clone!(
         #[weak] strips_box,
         #[weak] sidebar_box,
+        #[weak] streams_box,
+        #[weak] status_label,
+        #[weak] rules_button,
+        #[weak] devices_button,
+        #[weak] window,
         #[strong] widget_map,
         #[strong] selected_output_id,
         #[strong] css_provider,
@@ -96,6 +141,11 @@ fn build_ui(app: &adw::Application) {
             dbus::connect_and_subscribe(
                 strips_box,
                 sidebar_box,
+                streams_box,
+                status_label,
+                rules_button,
+                devices_button,
+                window,
                 widget_map,
                 selected_output_id,
                 css_provider,

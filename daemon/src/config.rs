@@ -11,6 +11,10 @@ pub struct ConfigFile {
     pub version: u32,
     pub inputs: Vec<ChannelConfig>,
     pub outputs: Vec<ChannelConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_input: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_rules: Vec<AppRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +23,16 @@ pub struct ChannelConfig {
     pub id: Option<u32>,
     pub name: String,
     pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppRule {
+    pub app_name: String,
+    pub input_id: u32,
 }
 
 impl ChannelConfig {
@@ -34,17 +48,19 @@ impl Default for ConfigFile {
         Self {
             version: 1,
             inputs: vec![
-                ChannelConfig { id: Some(1), name: "System".into(), color: "#4A90D9".into() },
-                ChannelConfig { id: Some(2), name: "Game".into(), color: "#E74C3C".into() },
-                ChannelConfig { id: Some(3), name: "Music".into(), color: "#2ECC71".into() },
-                ChannelConfig { id: Some(4), name: "Chat".into(), color: "#F39C12".into() },
+                ChannelConfig { id: Some(1), name: "System".into(), color: "#4A90D9".into(), target_device: None, capture_device: None },
+                ChannelConfig { id: Some(2), name: "Game".into(), color: "#E74C3C".into(), target_device: None, capture_device: None },
+                ChannelConfig { id: Some(3), name: "Music".into(), color: "#2ECC71".into(), target_device: None, capture_device: None },
+                ChannelConfig { id: Some(4), name: "Chat".into(), color: "#F39C12".into(), target_device: None, capture_device: None },
             ],
             outputs: vec![
-                ChannelConfig { id: Some(5), name: "Personal Mix".into(), color: "#8E44AD".into() },
-                ChannelConfig { id: Some(6), name: "Voice Chat Mix".into(), color: "#3498DB".into() },
-                ChannelConfig { id: Some(7), name: "Audience Mix".into(), color: "#E67E22".into() },
-                ChannelConfig { id: Some(8), name: "VOD Track".into(), color: "#1ABC9C".into() },
+                ChannelConfig { id: Some(5), name: "Personal Mix".into(), color: "#8E44AD".into(), target_device: None, capture_device: None },
+                ChannelConfig { id: Some(6), name: "Voice Chat Mix".into(), color: "#3498DB".into(), target_device: None, capture_device: None },
+                ChannelConfig { id: Some(7), name: "Audience Mix".into(), color: "#E67E22".into(), target_device: None, capture_device: None },
+                ChannelConfig { id: Some(8), name: "VOD Track".into(), color: "#1ABC9C".into(), target_device: None, capture_device: None },
             ],
+            default_input: Some(1),
+            app_rules: Vec::new(),
         }
     }
 }

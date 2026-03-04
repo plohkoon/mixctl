@@ -8,12 +8,29 @@ use tracing::warn;
 
 use crate::config::ConfigFile;
 
+/// Runtime state for an active audio stream (not persisted).
+#[derive(Debug, Clone)]
+pub struct StreamState {
+    pub app_name: String,
+    pub media_name: String,
+    pub input_id: u32,
+}
+
+/// Runtime state for a discovered capture device (not persisted).
+#[derive(Debug, Clone)]
+pub struct CaptureDeviceState {
+    pub name: String,
+    pub device_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateFile {
     pub version: u32,
     pub current_page: u32,
     pub outputs: HashMap<String, OutputState>,
     pub routes: HashMap<String, RouteState>,
+    #[serde(default)]
+    pub capture_volumes: HashMap<String, CaptureVolumeState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +63,21 @@ impl Default for RouteState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureVolumeState {
+    pub volume: u8,
+    pub muted: bool,
+}
+
+impl Default for CaptureVolumeState {
+    fn default() -> Self {
+        Self {
+            volume: 100,
+            muted: false,
+        }
+    }
+}
+
 impl Default for StateFile {
     fn default() -> Self {
         Self {
@@ -53,6 +85,7 @@ impl Default for StateFile {
             current_page: 0,
             outputs: HashMap::new(),
             routes: HashMap::new(),
+            capture_volumes: HashMap::new(),
         }
     }
 }
@@ -256,5 +289,31 @@ impl StateFile {
     pub fn remove_routes_for_output(&mut self, output_id: u32) {
         let suffix = format!(":{}", output_id);
         self.routes.retain(|key, _| !key.ends_with(&suffix));
+    }
+
+    // -- Capture volume state accessors --
+
+    pub fn capture_volume_state(&self, input_id: u32) -> Option<&CaptureVolumeState> {
+        self.capture_volumes.get(&input_id.to_string())
+    }
+
+    pub fn set_capture_volume(&mut self, input_id: u32, volume: u8) {
+        self.capture_volumes
+            .entry(input_id.to_string())
+            .or_insert_with(CaptureVolumeState::default)
+            .volume = volume;
+    }
+
+    pub fn set_capture_muted(&mut self, input_id: u32, muted: bool) {
+        self.capture_volumes
+            .entry(input_id.to_string())
+            .or_insert_with(CaptureVolumeState::default)
+            .muted = muted;
+    }
+
+    pub fn ensure_capture_volume(&mut self, input_id: u32) -> &mut CaptureVolumeState {
+        self.capture_volumes
+            .entry(input_id.to_string())
+            .or_insert_with(CaptureVolumeState::default)
     }
 }
