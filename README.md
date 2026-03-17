@@ -12,6 +12,7 @@ mixctl/
 │       ├── config.rs        # ~/.config/mixctl.toml — inputs, outputs, rules
 │       ├── state.rs         # ~/.local/state/mixctl.toml — volumes, mutes, routes
 │       ├── service.rs       # Shared state behind Arc<Mutex>
+│       ├── shutdown.rs      # ShutdownGuard (Drop-based cleanup) + signal handling
 │       ├── dbus_adapter.rs  # D-Bus method implementations
 │       └── audio/           # PipeWire audio routing engine
 │           ├── mod.rs           # Module root, re-exports
@@ -121,6 +122,7 @@ Communication:
 - **Commands** (tokio → PW): `tokio::mpsc` relay task forwards to `pipewire::channel::Sender`, which wakes the PW main loop. The PW channel sender is wrapped in `Arc<Mutex<Option<Sender>>>` and swapped on reconnection.
 - **Events** (PW → tokio): `tokio::mpsc::UnboundedSender` from PW thread to tokio for state updates and signal emission.
 - **Reconnection**: If PipeWire disconnects, the PW thread retries with exponential backoff (1s → 30s). On reconnection it creates a fresh `pipewire::channel` and sends a `ChannelReady` event so the tokio relay swaps to the new sender. Shutdown is coordinated via a shared `AtomicBool`.
+- **Graceful shutdown**: A `ShutdownGuard` (Drop-based) ensures cleanup on SIGINT, SIGTERM, error, or panic. On shutdown it restores the original PipeWire default sink and per-stream targets, destroys all virtual nodes and loopbacks in correct order, persists stream→input assignments as app rules for restart, and flushes config/state to disk.
 
 ### PipeWire audio routing (detailed)
 
@@ -181,6 +183,22 @@ The PipeWire engine monitors the registry for `Stream/Output/Audio` nodes (app p
 #### Capture devices
 
 Hardware capture devices (microphones, line-in) are discovered by monitoring for `Audio/Source` nodes in the PipeWire registry (excluding `mixctl.*` nodes). They can be added as mixer inputs, which creates a virtual sink + a loopback from the hardware device to that sink, keeping the architecture uniform — all inputs are sinks with monitors.
+
+#### Graceful shutdown
+
+The daemon captures original PipeWire state before overriding it and restores everything on exit:
+
+1. **Original state capture**: A metadata property listener records the pre-daemon `default.audio.sink` and per-stream `target.node` values. These are sent as events to the tokio side and stored in `Shared` with first-write-wins guards (subsequent changes from the daemon's own overrides are ignored).
+
+2. **Shutdown sequence** (SIGINT, SIGTERM, error, or panic triggers `ShutdownGuard::drop()`):
+   - Persist current stream→input assignments as app rules (for restart)
+   - Restore original default audio sink
+   - Restore/clear original stream targets
+   - Destroy all loopback modules (capture, route, output-target)
+   - Drop virtual sinks and sources
+   - Flush config/state to disk
+
+3. **Crash resilience**: Original values live on the tokio side in `Shared`, so a PW thread crash doesn't lose them. The `ShutdownGuard` uses `try_lock` so it still works if the mutex is poisoned. If setup fails before the guard is created, PipeWire cleans up `object.linger=false` nodes automatically on process exit.
 
 ### PipeWire node naming
 

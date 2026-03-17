@@ -312,7 +312,7 @@ fn handle_registry_global(
     global: &pw::registry::GlobalObject<&pw::spa::utils::dict::DictRef>,
 ) {
     match global.type_ {
-        ObjectType::Metadata => handle_metadata_global(state, registry, global),
+        ObjectType::Metadata => handle_metadata_global(state, event_sender, registry, global),
         ObjectType::Node => handle_node_global(state, event_sender, registry, global),
         _ => {}
     }
@@ -320,6 +320,7 @@ fn handle_registry_global(
 
 fn handle_metadata_global(
     state: &Rc<RefCell<PwState>>,
+    event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
     registry: &pw::registry::Registry,
     global: &pw::registry::GlobalObject<&pw::spa::utils::dict::DictRef>,
 ) {
@@ -346,6 +347,40 @@ fn handle_metadata_global(
     };
 
     debug!("bound default metadata object (id={})", global.id);
+
+    // Register metadata listener to capture original values before we override
+    let listener = metadata
+        .add_listener_local()
+        .property({
+            let event_sender = event_sender.clone();
+            move |subject, key, _type, value| {
+                match (subject, key) {
+                    (0, Some("default.audio.sink")) => {
+                        event_sender
+                            .send(PwEvent::OriginalDefaultSink {
+                                value: value.map(|v| v.to_string()),
+                            })
+                            .ok();
+                    }
+                    (id, Some("target.node")) if id != 0 => {
+                        if let Some(v) = value {
+                            if !v.contains("mixctl.") {
+                                event_sender
+                                    .send(PwEvent::OriginalStreamTarget {
+                                        stream_id: id,
+                                        value: v.to_string(),
+                                    })
+                                    .ok();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                0
+            }
+        })
+        .register();
+    s._metadata_listener = Some(Box::new(listener));
 
     // If we had a deferred default input, set it now
     if let Some(input_id) = s.deferred_default_input.take() {
@@ -658,11 +693,69 @@ fn handle_command(
             }
         }
 
-        PwCommand::Shutdown => {
+        PwCommand::Shutdown {
+            original_default_sink,
+            original_stream_targets,
+        } => {
+            cleanup_before_shutdown(state, original_default_sink, &original_stream_targets);
             state.borrow_mut().shutdown = true;
             main_loop.quit();
         }
     }
+}
+
+fn cleanup_before_shutdown(
+    state: &Rc<RefCell<PwState>>,
+    original_default_sink: Option<String>,
+    original_stream_targets: &HashMap<u32, String>,
+) {
+    let mut s = state.borrow_mut();
+
+    if let Some(metadata) = &s.metadata {
+        // 1. Restore original default.audio.sink
+        metadata.set_property(
+            0,
+            "default.audio.sink",
+            Some("Spa:String:JSON"),
+            original_default_sink.as_deref(),
+        );
+
+        // 2. Restore/clear target.node for each known stream
+        for &stream_id in &s.known_stream_ids {
+            let original = original_stream_targets.get(&stream_id);
+            metadata.set_property(
+                stream_id,
+                "target.node",
+                Some("Spa:String:JSON"),
+                original.map(|s| s.as_str()),
+            );
+        }
+    }
+
+    // 3. Destroy capture loopbacks
+    for (_, cap) in s.capture_loopbacks.drain() {
+        destroy_module(cap._module_ptr);
+    }
+
+    // 4. Destroy route loopbacks
+    for (_, lb) in s.route_loopbacks.drain() {
+        destroy_module(lb._module_ptr);
+    }
+
+    // 5. Destroy output target loopbacks
+    for (_, lb) in s.output_target_loopbacks.drain() {
+        destroy_module(lb._module_ptr);
+    }
+
+    // 6. Clear route playback node tracking
+    s.route_playback_nodes.clear();
+    s.route_playback_node_ids.clear();
+
+    // 7. Drop sinks and sources
+    s.input_sinks.clear();
+    s.output_sources.clear();
+
+    info!("PipeWire cleanup complete");
 }
 
 fn create_input_sink(

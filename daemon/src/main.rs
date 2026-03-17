@@ -2,10 +2,11 @@ mod audio;
 mod config;
 mod dbus_adapter;
 mod service;
+mod shutdown;
 mod state;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use mixctl_core::dbus::{BUS_NAME, OBJ_PATH};
@@ -216,32 +217,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    tokio::signal::ctrl_c().await?;
+    // ShutdownGuard handles all cleanup (restore originals, persist, teardown)
+    // on drop — whether from normal signal, error, or panic.
+    let guard = shutdown::ShutdownGuard::new(
+        svc.clone(),
+        shutdown_flag.clone(),
+        pw_chan_tx.clone(),
+        pw_engine,
+        vec![relay_handle, event_handle, signal_handle, flush_handle],
+    );
+
+    shutdown::wait_for_signal().await;
     info!("shutting down");
 
-    // Signal shutdown to PipeWire thread
-    shutdown_flag.store(true, Ordering::Relaxed);
-
-    // Send shutdown command to PipeWire engine (if connected)
-    pw_cmd_tx.send(PwCommand::Shutdown).ok();
-
-    // Clean up tasks
-    flush_handle.abort();
-    event_handle.abort();
-    signal_handle.abort();
-    relay_handle.abort();
-
-    // Wait for PipeWire thread to finish
-    pw_engine.join();
-
-    // Final flush
-    let shared = svc.inner.lock().await;
-    if shared.config_dirty {
-        shared.config.save()?;
-    }
-    if shared.state_dirty {
-        shared.state.save()?;
-    }
-
+    drop(guard);
     Ok(())
 }

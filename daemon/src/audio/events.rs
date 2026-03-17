@@ -50,6 +50,15 @@ pub enum PwEvent {
         pw_node_id: u32,
     },
 
+    // -- Original state (for shutdown restoration) --
+    OriginalDefaultSink {
+        value: Option<String>,
+    },
+    OriginalStreamTarget {
+        stream_id: u32,
+        value: String,
+    },
+
     // -- Errors --
     Error {
         message: String,
@@ -113,6 +122,17 @@ impl std::fmt::Debug for PwEvent {
             Self::CaptureDeviceRemoved { pw_node_id } => {
                 f.debug_struct("CaptureDeviceRemoved")
                     .field("pw_node_id", pw_node_id)
+                    .finish()
+            }
+            Self::OriginalDefaultSink { value } => {
+                f.debug_struct("OriginalDefaultSink")
+                    .field("value", value)
+                    .finish()
+            }
+            Self::OriginalStreamTarget { stream_id, value } => {
+                f.debug_struct("OriginalStreamTarget")
+                    .field("stream_id", stream_id)
+                    .field("value", value)
                     .finish()
             }
             Self::Error { message } => {

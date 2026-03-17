@@ -5,10 +5,11 @@ Long-running D-Bus service that manages the input/output mixer configuration, ru
 ## Architecture
 
 ```
-main.rs ──────────── startup, PW engine bootstrap, flush loop, shutdown
+main.rs ──────────── startup, PW engine bootstrap, flush loop, shutdown guard
 config.rs ────────── ~/.config/mixctl.toml (inputs, outputs, rules)
 state.rs ─────────── ~/.local/state/mixctl.toml (volumes, mutes, routes)
 service.rs ───────── Shared struct behind Arc<Mutex>
+shutdown.rs ──────── ShutdownGuard (Drop-based cleanup) + signal handling
 dbus_adapter.rs ──── #[zbus::interface] method implementations
 audio/
   mod.rs ─────────── module root, re-exports PwCommand, PwEvent, PwEngine
@@ -31,7 +32,9 @@ audio/
 9. Start signal emission task (caches `InterfaceRef`, dispatches via `ServiceSignal::emit()`)
 10. Start event consumer task (processes PW events including `ChannelReady` for reconnection, stream auto-assignment, capture device discovery)
 11. Start 30-second periodic flush loop for dirty config/state
-12. On Ctrl-C: set shutdown flag, send `PwCommand::Shutdown`, join PW thread, final flush, exit
+12. Create `ShutdownGuard` with references to service, PW channel, engine, and all task handles
+13. Wait for SIGINT or SIGTERM via `wait_for_signal()`
+14. Drop `ShutdownGuard` → graceful shutdown sequence (see below)
 
 ### Config
 
@@ -218,7 +221,7 @@ Monitors registry for `media.class = "Audio/Source"` nodes (excluding `mixctl.*`
 | `CreateCaptureInput { input_id, description, capture_device_name }` | Create capture input |
 | `DestroyCaptureLoopback { input_id }` | Remove capture loopback (keep input) |
 | `SetCaptureVolume { input_id, pw_volume: f32 }` | Set capture loopback volume |
-| `Shutdown` | Graceful PW thread exit |
+| `Shutdown { original_default_sink, original_stream_targets }` | Restore originals, clean teardown, quit PW loop |
 
 `SetRouteLink.volume` is a pre-computed `f32` combining route and output volumes (both cubic-scaled). Muting is encoded as `0.0`. Output volume changes fan out as `SetRouteLink` to every route on that output.
 
@@ -237,9 +240,46 @@ Monitors registry for `media.class = "Audio/Source"` nodes (excluding `mixctl.*`
 | `StreamRemoved { pw_node_id }` | App stopped |
 | `CaptureDeviceAppeared { pw_node_id, name, device_name }` | Mic/line-in detected |
 | `CaptureDeviceRemoved { pw_node_id }` | Device unplugged |
+| `OriginalDefaultSink { value }` | Pre-daemon default sink (for shutdown restore) |
+| `OriginalStreamTarget { stream_id, value }` | Pre-daemon stream target (for shutdown restore) |
 | `Error { message }` | PipeWire error |
 
 `ChannelReady` is handled directly in `main.rs` (swaps the relay sender); all other events go through `Service::handle_pw_event()`. `PwEvent` has a manual `Debug` impl because `pipewire::channel::Sender` doesn't implement `Debug`.
+
+### Graceful shutdown
+
+The daemon uses a `ShutdownGuard` (Drop-based) pattern to ensure cleanup runs on normal exit, error, or panic. Original PipeWire state is captured on the PW thread via a metadata listener and sent as events to the tokio side, where it's stored in `Shared`.
+
+**State capture**: A metadata property listener is registered when the "default" metadata object is discovered. It fires for every `default.audio.sink` and `target.node` change. The tokio-side handler uses `is_none()` / `or_insert()` guards so only the first (pre-daemon) value is saved — subsequent changes from the daemon's own overrides are ignored.
+
+**Shutdown sequence** (triggered by SIGINT, SIGTERM, error, or panic):
+
+```
+ShutdownGuard::drop()
+  │
+  ├─ Lock Shared, persist stream→input assignments as app rules
+  ├─ Build Shutdown command with original_default_sink + original_stream_targets
+  ├─ shutdown_flag.store(true)
+  ├─ Send Shutdown directly via pw_chan_tx (bypasses relay)
+  │       │
+  │       ▼ (PW thread)
+  │       ├─ Restore default.audio.sink to pre-daemon value
+  │       ├─ Restore/clear target.node for each known stream
+  │       ├─ Destroy capture/route/output-target loopbacks
+  │       ├─ Drop input sinks + output sources
+  │       └─ main_loop.quit()
+  │
+  ├─ Abort tokio tasks
+  ├─ pw_engine.join()
+  └─ Final flush config/state to disk
+```
+
+**Crash resilience**:
+- **PW thread crash** → tokio side still has originals in `Shared`. PW reconnects automatically, cleanup uses saved values.
+- **Main thread crash** → `ShutdownGuard` Drop impl reads originals from `Shared` (via `try_lock`) and sends them with the Shutdown command to the PW thread.
+- **Setup failure** → no guard exists yet, no audio has been intercepted. Process exit causes PipeWire to clean up `object.linger=false` nodes automatically.
+
+**Stream assignment persistence**: On shutdown, `persist_stream_assignments()` saves current stream→input mappings as app rules for any stream that doesn't already have a matching rule. On restart, these rules auto-assign returning streams to their previous inputs.
 
 ## Dependencies
 

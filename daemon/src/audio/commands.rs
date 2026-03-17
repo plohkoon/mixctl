@@ -66,5 +66,8 @@ pub enum PwCommand {
     },
 
     /// Graceful shutdown of the PipeWire thread.
-    Shutdown,
+    Shutdown {
+        original_default_sink: Option<String>,
+        original_stream_targets: std::collections::HashMap<u32, String>,
+    },
 }

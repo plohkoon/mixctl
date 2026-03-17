@@ -49,9 +49,28 @@ pub struct Shared {
     pub audio_connected: bool,
     pub active_streams: HashMap<u32, StreamState>,
     pub capture_devices: HashMap<u32, CaptureDeviceState>,
+    pub original_default_sink: Option<String>,
+    pub original_stream_targets: HashMap<u32, String>,
 }
 
 impl Shared {
+    /// Persist current stream→input assignments as app rules for restart.
+    pub fn persist_stream_assignments(&mut self) {
+        for stream in self.active_streams.values() {
+            if stream.input_id == 0 {
+                continue;
+            }
+            if self.match_app_rule(&stream.app_name).is_some() {
+                continue;
+            }
+            self.config.app_rules.push(crate::config::AppRule {
+                app_name: stream.app_name.clone(),
+                input_id: stream.input_id,
+            });
+            self.config_dirty = true;
+        }
+    }
+
     /// Match an app name against configured rules. Returns the input_id if matched.
     pub fn match_app_rule(&self, app_name: &str) -> Option<u32> {
         for rule in &self.config.app_rules {
@@ -108,6 +127,8 @@ impl Service {
                 audio_connected: false,
                 active_streams: HashMap::new(),
                 capture_devices: HashMap::new(),
+                original_default_sink: None,
+                original_stream_targets: HashMap::new(),
             })),
         }
     }
@@ -237,6 +258,16 @@ impl Service {
                 let mut shared = self.inner.lock().await;
                 shared.capture_devices.remove(&pw_node_id);
                 shared.signal_tx.send(ServiceSignal::CaptureDevicesChanged).ok();
+            }
+            PwEvent::OriginalDefaultSink { value } => {
+                let mut shared = self.inner.lock().await;
+                if shared.original_default_sink.is_none() {
+                    shared.original_default_sink = value;
+                }
+            }
+            PwEvent::OriginalStreamTarget { stream_id, value } => {
+                let mut shared = self.inner.lock().await;
+                shared.original_stream_targets.entry(stream_id).or_insert(value);
             }
             PwEvent::ChannelReady { .. } => {
                 // Handled directly in main.rs event loop, not forwarded here
