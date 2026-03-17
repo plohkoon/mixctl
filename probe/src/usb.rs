@@ -96,6 +96,14 @@ impl Device {
         Ok(n)
     }
 
+    pub fn write_raw_timeout(&self, data: &[u8], timeout: Duration) -> Result<usize> {
+        let n = self
+            .handle
+            .write_interrupt(EP_OUT, data, timeout)
+            .context("write_raw failed")?;
+        Ok(n)
+    }
+
     pub fn read(&self, timeout: Duration) -> Result<Vec<u8>> {
         let mut buf = [0u8; 64];
         let n = self

@@ -11,41 +11,45 @@ pub fn build_image_chunk(index: u32, payload: &[u8; 1020]) -> [u8; 1024] {
     buf
 }
 
-pub fn build_image_final(total_size: u32, x: u16, y: u16) -> [u8; 1024] {
+pub fn build_image_final(total_size: u32, x: u32, y: u32) -> [u8; 1024] {
     let mut buf = [0u8; 1024];
-    // Terminator marker
+    // Terminator marker (3 bytes) + opcode
     buf[0] = 0xFF;
     buf[1] = 0xFF;
     buf[2] = 0xFF;
-    buf[3] = 0xFF;
-    // Total payload size (LE)
-    let size_bytes = total_size.to_le_bytes();
+    buf[3] = OPCODE;
+    // Total payload size - 1 (LE u32)
+    let size_bytes = total_size.saturating_sub(1).to_le_bytes();
     buf[4] = size_bytes[0];
     buf[5] = size_bytes[1];
     buf[6] = size_bytes[2];
     buf[7] = size_bytes[3];
-    // X position (LE)
+    // X position (LE u32)
     let x_bytes = x.to_le_bytes();
     buf[8] = x_bytes[0];
     buf[9] = x_bytes[1];
-    // Y position (LE)
+    buf[10] = x_bytes[2];
+    buf[11] = x_bytes[3];
+    // Y position (LE u32)
     let y_bytes = y.to_le_bytes();
-    buf[10] = y_bytes[0];
-    buf[11] = y_bytes[1];
+    buf[12] = y_bytes[0];
+    buf[13] = y_bytes[1];
+    buf[14] = y_bytes[2];
+    buf[15] = y_bytes[3];
     buf
 }
 
 pub struct ImageChunker<'a> {
     data: &'a [u8],
-    x: u16,
-    y: u16,
+    x: u32,
+    y: u32,
     offset: usize,
     index: u32,
     done: bool,
 }
 
 impl<'a> ImageChunker<'a> {
-    pub fn new(data: &'a [u8], x: u16, y: u16) -> Self {
+    pub fn new(data: &'a [u8], x: u32, y: u32) -> Self {
         Self {
             data,
             x,
@@ -115,13 +119,13 @@ mod tests {
         assert_eq!(final_pkt[0], 0xFF);
         assert_eq!(final_pkt[1], 0xFF);
         assert_eq!(final_pkt[2], 0xFF);
-        assert_eq!(final_pkt[3], 0xFF);
-        // total_size = 12345 = 0x3039 LE
-        assert_eq!(u32::from_le_bytes([final_pkt[4], final_pkt[5], final_pkt[6], final_pkt[7]]), 12345);
-        // x = 100 LE
-        assert_eq!(u16::from_le_bytes([final_pkt[8], final_pkt[9]]), 100);
-        // y = 200 LE
-        assert_eq!(u16::from_le_bytes([final_pkt[10], final_pkt[11]]), 200);
+        assert_eq!(final_pkt[3], OPCODE);
+        // total_size = 12345 - 1 = 12344 LE
+        assert_eq!(u32::from_le_bytes([final_pkt[4], final_pkt[5], final_pkt[6], final_pkt[7]]), 12344);
+        // x = 100 LE u32
+        assert_eq!(u32::from_le_bytes([final_pkt[8], final_pkt[9], final_pkt[10], final_pkt[11]]), 100);
+        // y = 200 LE u32
+        assert_eq!(u32::from_le_bytes([final_pkt[12], final_pkt[13], final_pkt[14], final_pkt[15]]), 200);
     }
 
     #[test]
@@ -129,7 +133,8 @@ mod tests {
         let data = [];
         let chunks: Vec<_> = ImageChunker::new(&data, 0, 0).collect();
         assert_eq!(chunks.len(), 1); // just the final packet
-        assert_eq!(chunks[0][0..4], [0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(chunks[0][0..3], [0xFF, 0xFF, 0xFF]);
+        assert_eq!(chunks[0][3], OPCODE);
     }
 
     #[test]
@@ -141,7 +146,8 @@ mod tests {
         assert_eq!(chunks[0][3], OPCODE);
         assert_eq!(chunks[0][4], 0xBB);
         // Second chunk: final
-        assert_eq!(chunks[1][0..4], [0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(chunks[1][0..3], [0xFF, 0xFF, 0xFF]);
+        assert_eq!(chunks[1][3], OPCODE);
     }
 
     #[test]
@@ -161,6 +167,7 @@ mod tests {
         assert_eq!(chunks[0][0], 0); // index 0
         assert_eq!(chunks[1][0], 1); // index 1
         assert_eq!(chunks[2][0], 2); // index 2
-        assert_eq!(chunks[3][0..4], [0xFF, 0xFF, 0xFF, 0xFF]); // final
+        assert_eq!(chunks[3][0..3], [0xFF, 0xFF, 0xFF]); // final
+        assert_eq!(chunks[3][3], OPCODE);
     }
 }
