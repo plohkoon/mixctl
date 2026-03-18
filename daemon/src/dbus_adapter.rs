@@ -4,6 +4,8 @@ use mixctl_core::{
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
 
+use mixctl_core::config_sections::{AppletConfig, BeacnConfig, CliConfig, UiConfig};
+
 use crate::audio::PwCommand;
 use crate::audio::volume::u8_to_pw_volume;
 use crate::service::{Service, ServiceSignal};
@@ -114,6 +116,7 @@ impl Service {
             shared.send_route_link(id, output_id);
         }
 
+
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
         Ok(id)
@@ -143,6 +146,7 @@ impl Service {
         }
         shared.config_dirty = true;
         shared.state_dirty = true;
+
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -173,6 +177,7 @@ impl Service {
         let entry = shared.config.inputs.remove(from);
         shared.config.inputs.insert(to, entry);
         shared.config_dirty = true;
+
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -200,6 +205,7 @@ impl Service {
             },
         );
 
+
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -224,6 +230,7 @@ impl Service {
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("input id {} not found", id)))?;
         cfg.color = color.to_string();
         shared.config_dirty = true;
+
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -303,6 +310,7 @@ impl Service {
             shared.send_route_link(input_id, id);
         }
 
+
         drop(shared);
         Self::outputs_config_changed(&emitter).await.ok();
         Ok(id)
@@ -329,6 +337,7 @@ impl Service {
         shared.state.remove_routes_for_output(id);
         shared.config_dirty = true;
         shared.state_dirty = true;
+
         drop(shared);
         Self::outputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -359,6 +368,7 @@ impl Service {
         let entry = shared.config.outputs.remove(from);
         shared.config.outputs.insert(to, entry);
         shared.config_dirty = true;
+
         drop(shared);
         Self::outputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -386,6 +396,7 @@ impl Service {
             },
         );
 
+
         drop(shared);
         Self::outputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -410,6 +421,7 @@ impl Service {
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("output id {} not found", id)))?;
         cfg.color = color.to_string();
         shared.config_dirty = true;
+
         drop(shared);
         Self::outputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -443,6 +455,7 @@ impl Service {
             shared.send_route_link(input_id, id);
         }
 
+
         drop(shared);
         Self::output_state_changed(&emitter, id).await.ok();
         Ok(())
@@ -469,6 +482,7 @@ impl Service {
         for input_id in input_ids {
             shared.send_route_link(input_id, id);
         }
+
 
         drop(shared);
         Self::output_state_changed(&emitter, id).await.ok();
@@ -587,6 +601,7 @@ impl Service {
 
         shared.send_route_link(input_id, output_id);
 
+
         drop(shared);
         Self::route_changed(&emitter, input_id, output_id).await.ok();
         Ok(())
@@ -616,6 +631,7 @@ impl Service {
         shared.state_dirty = true;
 
         shared.send_route_link(input_id, output_id);
+
 
         drop(shared);
         Self::route_changed(&emitter, input_id, output_id).await.ok();
@@ -983,9 +999,118 @@ impl Service {
         }
         shared.state.current_page = page;
         shared.state_dirty = true;
+
         drop(shared);
         Self::page_changed(&emitter, page).await.ok();
         Ok(())
+    }
+
+    // -- Config sections --
+
+    async fn get_config_section(&self, section: &str) -> zbus::fdo::Result<String> {
+        let shared = self.inner.lock().await;
+        let json = match section {
+            "beacn" => serde_json::to_string(&shared.config.beacn),
+            "ui" => serde_json::to_string(&shared.config.ui),
+            "applet" => serde_json::to_string(&shared.config.applet),
+            "cli" => serde_json::to_string(&shared.config.cli),
+            _ => {
+                return Err(zbus::fdo::Error::InvalidArgs(format!(
+                    "unknown config section '{section}'"
+                )));
+            }
+        }
+        .map_err(|e| zbus::fdo::Error::Failed(format!("serialize failed: {e}")))?;
+        Ok(json)
+    }
+
+    async fn set_config_section(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        section: &str,
+        json: &str,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        match section {
+            "beacn" => {
+                shared.config.beacn = serde_json::from_str::<BeacnConfig>(json)
+                    .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
+            }
+            "ui" => {
+                shared.config.ui = serde_json::from_str::<UiConfig>(json)
+                    .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
+            }
+            "applet" => {
+                shared.config.applet = serde_json::from_str::<AppletConfig>(json)
+                    .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
+            }
+            "cli" => {
+                shared.config.cli = serde_json::from_str::<CliConfig>(json)
+                    .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
+            }
+            _ => {
+                return Err(zbus::fdo::Error::InvalidArgs(format!(
+                    "unknown config section '{section}'"
+                )));
+            }
+        }
+        shared.config_dirty = true;
+        let section_name = section.to_string();
+        shared
+            .signal_tx
+            .send(ServiceSignal::ConfigSectionChanged {
+                section: section_name.clone(),
+            })
+            .ok();
+        drop(shared);
+        Self::config_section_changed(&emitter, section_name).await.ok();
+        Ok(())
+    }
+
+    // -- Level monitoring --
+
+    async fn get_broadcast_levels(&self) -> zbus::fdo::Result<bool> {
+        let shared = self.inner.lock().await;
+        Ok(shared.config.broadcast_levels.unwrap_or(false))
+    }
+
+    async fn set_broadcast_levels(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        let was_enabled = shared.config.broadcast_levels.unwrap_or(false);
+        if enabled == was_enabled {
+            return Ok(());
+        }
+        shared.config.broadcast_levels = Some(enabled);
+        shared.config_dirty = true;
+
+        if enabled {
+            Service::send_pw_cmd(&shared, PwCommand::EnableLevelMonitoring);
+        } else {
+            Service::send_pw_cmd(&shared, PwCommand::DisableLevelMonitoring);
+            shared.input_levels.clear();
+        }
+        shared
+            .signal_tx
+            .send(ServiceSignal::BroadcastLevelsChanged { enabled })
+            .ok();
+
+        drop(shared);
+        Self::broadcast_levels_changed(&emitter, enabled).await.ok();
+        Ok(())
+    }
+
+    async fn get_input_levels(&self) -> zbus::fdo::Result<Vec<(u32, f64)>> {
+        let shared = self.inner.lock().await;
+        let levels: Vec<(u32, f64)> = shared
+            .input_levels
+            .iter()
+            .map(|(&id, &lvl)| (id, lvl as f64))
+            .collect();
+        Ok(levels)
     }
 
     // -- Signals --
@@ -1020,6 +1145,24 @@ impl Service {
 
     #[zbus(signal)]
     async fn capture_devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn input_levels_changed(
+        emitter: &SignalEmitter<'_>,
+        levels: Vec<(u32, f64)>,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn broadcast_levels_changed(
+        emitter: &SignalEmitter<'_>,
+        enabled: bool,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn config_section_changed(
+        emitter: &SignalEmitter<'_>,
+        section: String,
+    ) -> zbus::Result<()>;
 }
 
 // Public wrappers for signal emission from outside the #[interface] block.
@@ -1034,5 +1177,26 @@ impl Service {
 
     pub async fn emit_streams_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()> {
         Self::streams_changed(emitter).await
+    }
+
+    pub async fn emit_input_levels_changed(
+        emitter: &SignalEmitter<'_>,
+        levels: Vec<(u32, f64)>,
+    ) -> zbus::Result<()> {
+        Self::input_levels_changed(emitter, levels).await
+    }
+
+    pub async fn emit_broadcast_levels_changed(
+        emitter: &SignalEmitter<'_>,
+        enabled: bool,
+    ) -> zbus::Result<()> {
+        Self::broadcast_levels_changed(emitter, enabled).await
+    }
+
+    pub async fn emit_config_section_changed(
+        emitter: &SignalEmitter<'_>,
+        section: String,
+    ) -> zbus::Result<()> {
+        Self::config_section_changed(emitter, section).await
     }
 }

@@ -65,6 +65,10 @@ pub enum PwCommand {
         pw_volume: f32,
     },
 
+    // -- Level monitoring --
+    EnableLevelMonitoring,
+    DisableLevelMonitoring,
+
     /// Graceful shutdown of the PipeWire thread.
     Shutdown {
         original_default_sink: Option<String>,

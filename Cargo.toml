@@ -2,10 +2,14 @@
 resolver = "2"
 members = [
   "daemon",
-  "cli",
-  "probe",
+  "apps/cli",
+  "apps/ui",
+  "apps/applet",
   "crates/core",
   "crates/protocol",
-  "ui",
-  "applet",
+  "crates/display",
+  "crates/device",
+  "devices/beacn-daemon",
+  "tools/beacn-probe",
+  "tools/beacn-test",
 ]

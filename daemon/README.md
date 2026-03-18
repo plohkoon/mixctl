@@ -1,6 +1,6 @@
 # mixctl-daemon
 
-Long-running D-Bus service that manages the input/output mixer configuration, runtime state, and PipeWire audio routing for the Beacn Mix.
+Long-running D-Bus service that manages the input/output mixer configuration, runtime state, and PipeWire audio routing. This is the core mixer engine — it has no knowledge of hardware controllers. Device daemons (e.g., `mixctl-beacn-daemon`) connect as D-Bus clients.
 
 ## Architecture
 
@@ -63,6 +63,37 @@ input_id = 1
 Optional fields on channels:
 - `target_device`: PipeWire node name of a physical device to auto-link an output to
 - `capture_device`: PipeWire node name of a hardware capture device (for capture inputs)
+
+### Config subsections
+
+Component-specific configuration lives in named TOML subsections. Missing sections use defaults. Consumers fetch their section over D-Bus — they never read the TOML file directly.
+
+```toml
+[beacn]
+layout = "column"           # column, grid, dial
+dial_sensitivity = 2        # multiplier for dial delta
+level_decay = 0.8           # exponential decay factor per frame
+
+[ui]
+window_width = 750
+window_height = 450
+margin = 12
+
+[applet]
+window_width = 380
+poll_interval_ms = 30
+open_ui_command = "mixctl-ui"
+
+[cli]
+color_output = true
+output_format = "text"
+```
+
+D-Bus methods for config sections:
+- `get_config_section(section)` → returns JSON for the section
+- `set_config_section(section, json)` → persists and emits `config_section_changed` signal
+
+Shared config structs (`BeacnConfig`, `UiConfig`, `AppletConfig`, `CliConfig`) are defined in `mixctl-core::config_sections` and used by both daemon and consumers. Fields use `#[serde(default)]` for field-level defaults, and `#[serde(skip_serializing_if = "is_default")]` keeps the TOML clean.
 
 The `id` field uses `Option<u32>` with `#[serde(default)]` for hand-edit resilience. On load, `fixup_ids()` assigns IDs to any entry missing one and deduplicates.
 
@@ -221,9 +252,15 @@ Monitors registry for `media.class = "Audio/Source"` nodes (excluding `mixctl.*`
 | `CreateCaptureInput { input_id, description, capture_device_name }` | Create capture input |
 | `DestroyCaptureLoopback { input_id }` | Remove capture loopback (keep input) |
 | `SetCaptureVolume { input_id, pw_volume: f32 }` | Set capture loopback volume |
+| `EnableLevelMonitoring` | Start sending `LevelUpdate` events |
+| `DisableLevelMonitoring` | Stop level monitoring |
 | `Shutdown { original_default_sink, original_stream_targets }` | Restore originals, clean teardown, quit PW loop |
 
 `SetRouteLink.volume` is a pre-computed `f32` combining route and output volumes (both cubic-scaled). Muting is encoded as `0.0`. Output volume changes fan out as `SetRouteLink` to every route on that output.
+
+### Level monitoring
+
+When `broadcast_levels` is enabled (`set_broadcast_levels(true)`), the PipeWire engine periodically reads peak levels from input sink monitor ports and sends `PwEvent::LevelUpdate` events to the tokio side. These are emitted as `input_levels_changed` D-Bus signals at ~20Hz. Device daemons (e.g., `mixctl-beacn-daemon`) apply exponential decay and render level indicators on hardware displays.
 
 ### PwEvent enum
 
@@ -242,6 +279,7 @@ Monitors registry for `media.class = "Audio/Source"` nodes (excluding `mixctl.*`
 | `CaptureDeviceRemoved { pw_node_id }` | Device unplugged |
 | `OriginalDefaultSink { value }` | Pre-daemon default sink (for shutdown restore) |
 | `OriginalStreamTarget { stream_id, value }` | Pre-daemon stream target (for shutdown restore) |
+| `LevelUpdate { levels: Vec<(u32, f32)> }` | Per-input audio levels (0.0-1.0) |
 | `Error { message }` | PipeWire error |
 
 `ChannelReady` is handled directly in `main.rs` (swaps the relay sender); all other events go through `Service::handle_pw_event()`. `PwEvent` has a manual `Debug` impl because `pipewire::channel::Sender` doesn't implement `Debug`.
@@ -288,6 +326,6 @@ ShutdownGuard::drop()
 - `glob-match` — glob pattern matching for app rules
 - `zbus` — D-Bus server
 - `tokio` — async runtime
-- `serde` / `toml` — config and state serialization
+- `serde` / `serde_json` / `toml` — config and state serialization
 - `tracing` — structured logging
 - `dirs` — XDG-ish path resolution

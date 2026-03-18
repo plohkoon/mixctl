@@ -53,7 +53,7 @@ impl Drop for ShutdownGuard {
         };
 
         // 2. Signal PW reconnection loop to stop
-        self.shutdown_flag.store(true, Ordering::Relaxed);
+        self.shutdown_flag.store(true, Ordering::Release);
 
         // 3. Send Shutdown directly to PW channel (bypass relay)
         if let Ok(guard) = self.pw_chan_tx.try_lock() {

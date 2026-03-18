@@ -3,8 +3,13 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
+use mixctl_core::config_sections::{AppletConfig, BeacnConfig, CliConfig, UiConfig};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+
+fn is_default<T: Default + PartialEq>(val: &T) -> bool {
+    *val == T::default()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigFile {
@@ -15,6 +20,16 @@ pub struct ConfigFile {
     pub default_input: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_levels: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub beacn: BeacnConfig,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub ui: UiConfig,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub applet: AppletConfig,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub cli: CliConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +76,11 @@ impl Default for ConfigFile {
             ],
             default_input: Some(1),
             app_rules: Vec::new(),
+            broadcast_levels: None,
+            beacn: BeacnConfig::default(),
+            ui: UiConfig::default(),
+            applet: AppletConfig::default(),
+            cli: CliConfig::default(),
         }
     }
 }

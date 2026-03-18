@@ -62,6 +62,15 @@ pub trait MixCtl {
     fn get_current_page(&self) -> zbus::Result<u32>;
     fn set_current_page(&self, page: u32) -> zbus::Result<()>;
 
+    // Config sections
+    fn get_config_section(&self, section: &str) -> zbus::Result<String>;
+    fn set_config_section(&self, section: &str, json: &str) -> zbus::Result<()>;
+
+    // Level monitoring
+    fn get_broadcast_levels(&self) -> zbus::Result<bool>;
+    fn set_broadcast_levels(&self, enabled: bool) -> zbus::Result<()>;
+    fn get_input_levels(&self) -> zbus::Result<Vec<(u32, f64)>>;
+
     // Signals
     #[zbus(signal)]
     fn inputs_config_changed(&self) -> zbus::Result<()>;
@@ -89,4 +98,13 @@ pub trait MixCtl {
 
     #[zbus(signal)]
     fn capture_devices_changed(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn input_levels_changed(&self, levels: Vec<(u32, f64)>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn broadcast_levels_changed(&self, enabled: bool) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn config_section_changed(&self, section: String) -> zbus::Result<()>;
 }

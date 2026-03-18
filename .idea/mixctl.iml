@@ -9,6 +9,13 @@
       <sourceFolder url="file://$MODULE_DIR$/daemon/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/probe/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/ui/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/device/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/display/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/device-test/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/beacn-daemon/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/devices/beacn-daemon/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/beacn-probe/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/beacn-test/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

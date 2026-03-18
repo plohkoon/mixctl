@@ -1,0 +1,11 @@
+[package]
+name = "mixctl-beacn-test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mixctl-beacn-device = { path = "../../crates/device" }
+mixctl-beacn-display = { path = "../../crates/display" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

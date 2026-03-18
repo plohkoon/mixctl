@@ -1,0 +1,12 @@
+[package]
+name = "mixctl-beacn-device"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mixctl-protocol = { path = "../protocol" }
+mixctl-beacn-display = { path = "../display" }
+rusb = "0.9"
+tokio = { version = "1", features = ["sync"] }
+anyhow = "1"
+tracing = "0.1"

@@ -1,0 +1,13 @@
+[package]
+name = "mixctl-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mixctl-core = { path = "../../crates/core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gtk4 = "0.11"
+libadwaita = "0.9"
+zbus = "5"
+futures-lite = "2"

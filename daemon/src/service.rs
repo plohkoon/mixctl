@@ -16,6 +16,9 @@ pub enum ServiceSignal {
     AudioStatusChanged,
     CaptureDevicesChanged,
     StreamsChanged,
+    InputLevelsChanged { levels: Vec<(u32, f64)> },
+    BroadcastLevelsChanged { enabled: bool },
+    ConfigSectionChanged { section: String },
 }
 
 impl ServiceSignal {
@@ -29,6 +32,15 @@ impl ServiceSignal {
             }
             Self::StreamsChanged => {
                 Service::emit_streams_changed(emitter).await.ok();
+            }
+            Self::InputLevelsChanged { levels } => {
+                Service::emit_input_levels_changed(emitter, levels.clone()).await.ok();
+            }
+            Self::BroadcastLevelsChanged { enabled } => {
+                Service::emit_broadcast_levels_changed(emitter, *enabled).await.ok();
+            }
+            Self::ConfigSectionChanged { section } => {
+                Service::emit_config_section_changed(emitter, section.clone()).await.ok();
             }
         }
     }
@@ -51,6 +63,7 @@ pub struct Shared {
     pub capture_devices: HashMap<u32, CaptureDeviceState>,
     pub original_default_sink: Option<String>,
     pub original_stream_targets: HashMap<u32, String>,
+    pub input_levels: HashMap<u32, f32>,
 }
 
 impl Shared {
@@ -107,6 +120,7 @@ impl Shared {
             },
         );
     }
+
 }
 
 impl Service {
@@ -129,6 +143,7 @@ impl Service {
                 capture_devices: HashMap::new(),
                 original_default_sink: None,
                 original_stream_targets: HashMap::new(),
+                input_levels: HashMap::new(),
             })),
         }
     }
@@ -269,6 +284,20 @@ impl Service {
                 let mut shared = self.inner.lock().await;
                 shared.original_stream_targets.entry(stream_id).or_insert(value);
             }
+            PwEvent::LevelUpdate { levels } => {
+                let mut shared = self.inner.lock().await;
+                for &(input_id, level) in &levels {
+                    shared.input_levels.insert(input_id, level);
+                }
+                let dbus_levels: Vec<(u32, f64)> = levels
+                    .into_iter()
+                    .map(|(id, lvl)| (id, lvl as f64))
+                    .collect();
+                shared
+                    .signal_tx
+                    .send(ServiceSignal::InputLevelsChanged { levels: dbus_levels })
+                    .ok();
+            }
             PwEvent::ChannelReady { .. } => {
                 // Handled directly in main.rs event loop, not forwarded here
             }
@@ -284,4 +313,5 @@ impl Service {
             tracing::warn!("failed to send PW command: {e}");
         }
     }
+
 }

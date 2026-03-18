@@ -24,6 +24,7 @@ use crate::config::ConfigFile;
 use crate::service::{Service, ServiceSignal};
 use crate::state::StateFile;
 
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -104,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
 
     let default_input_id = config.default_input;
 
+    let broadcast_levels = config.broadcast_levels.unwrap_or(false);
     let pw_config = PwEngineConfig {
         inputs,
         outputs,
@@ -111,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         output_targets,
         capture_inputs,
         default_input_id,
+        broadcast_levels,
     };
 
     // Create command channel: tokio → relay → pipewire channel → PW thread

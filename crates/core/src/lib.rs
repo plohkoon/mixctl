@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use zvariant::Type;
+pub mod config_sections;
 pub mod dbus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

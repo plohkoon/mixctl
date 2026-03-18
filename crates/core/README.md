@@ -17,6 +17,19 @@ Shared types and D-Bus interface definition used by the daemon, CLI, UI, and app
 
 All types derive `Serialize`, `Deserialize`, and `zvariant::Type` for D-Bus marshalling.
 
+### Config section types (`config_sections` module)
+
+Shared configuration structs for component subsections, fetched over D-Bus as JSON:
+
+| Type | Fields | Description |
+|---|---|---|
+| `BeacnConfig` | `layout, dial_sensitivity, level_decay` | Beacn hardware daemon settings |
+| `UiConfig` | `window_width, window_height, margin` | GTK4 UI settings |
+| `AppletConfig` | `window_width, poll_interval_ms, open_ui_command` | System tray applet settings |
+| `CliConfig` | `color_output, output_format` | CLI output settings |
+
+All types derive `Serialize`, `Deserialize`, `Default`, and `PartialEq`. Each field has `#[serde(default)]` for field-level defaults matching current hardcoded values.
+
 ### Utilities
 
 - `parse_hex_color(s: &str) -> Option<(u8, u8, u8)>` — parses `"#RRGGBB"` strings.
@@ -71,6 +84,11 @@ The `dbus` module defines the `MixCtl` trait with `#[zbus::proxy]`, which genera
 | `set_capture_mute` | `id, muted` | — | Set capture mute |
 | `get_current_page` | — | `u32` | Current display page |
 | `set_current_page` | `page` | — | Set display page |
+| `get_broadcast_levels` | — | `bool` | Level monitoring enabled? |
+| `set_broadcast_levels` | `enabled` | — | Toggle level monitoring |
+| `get_input_levels` | — | `Vec<(u32, f64)>` | Current input audio levels |
+| `get_config_section` | `section` | `String` | Get config section as JSON |
+| `set_config_section` | `section, json` | — | Update config section from JSON |
 
 ### Signals
 
@@ -85,8 +103,12 @@ The `dbus` module defines the `MixCtl` trait with `#[zbus::proxy]`, which genera
 | `streams_changed` | — | Stream appeared/removed/reassigned |
 | `app_rules_changed` | — | Rule added/updated/removed |
 | `capture_devices_changed` | — | Capture device appeared/removed |
+| `input_levels_changed` | `levels: Vec<(u32, f64)>` | Per-input audio levels updated |
+| `broadcast_levels_changed` | `enabled` | Level monitoring toggled |
+| `config_section_changed` | `section` | Config section updated |
 
 ## Dependencies
 
 - `serde` — serialization for all types
+- `serde_json` — JSON serialization for config sections
 - `zbus` / `zvariant` — D-Bus proxy generation and type marshalling

@@ -59,6 +59,11 @@ pub enum PwEvent {
         value: String,
     },
 
+    // -- Level monitoring --
+    LevelUpdate {
+        levels: Vec<(u32, f32)>,
+    },
+
     // -- Errors --
     Error {
         message: String,
@@ -133,6 +138,11 @@ impl std::fmt::Debug for PwEvent {
                 f.debug_struct("OriginalStreamTarget")
                     .field("stream_id", stream_id)
                     .field("value", value)
+                    .finish()
+            }
+            Self::LevelUpdate { levels } => {
+                f.debug_struct("LevelUpdate")
+                    .field("levels", levels)
                     .finish()
             }
             Self::Error { message } => {

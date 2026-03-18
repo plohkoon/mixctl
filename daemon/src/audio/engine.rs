@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use pipewire as pw;
 use pipewire::node::Node;
 use pipewire::properties::properties;
@@ -23,6 +23,12 @@ use super::events::PwEvent;
 /// SPA_PROP_channelVolumes (0x20005 from spa/param/props.h)
 const SPA_PROP_CHANNEL_VOLUMES: u32 = 0x20005;
 
+/// SPA_PROP_monitorVolumes (0x10001 from spa/param/props.h)
+const SPA_PROP_MONITOR_VOLUMES: u32 = 0x10001;
+
+/// Minimum interval between level updates per node (~20Hz)
+const LEVEL_THROTTLE_MS: u128 = 50;
+
 pub struct PwEngine {
     thread_handle: thread::JoinHandle<()>,
 }
@@ -35,6 +41,7 @@ pub struct PwEngineConfig {
     pub output_targets: Vec<PwOutputTargetConfig>,
     pub capture_inputs: Vec<PwCaptureInputConfig>,
     pub default_input_id: Option<u32>,
+    pub broadcast_levels: bool,
 }
 
 pub struct PwInputConfig {
@@ -91,7 +98,7 @@ impl PwEngine {
 
                 run_pw_loop(&config, new_rx, &event_sender);
 
-                if shutdown_flag.load(Ordering::Relaxed) {
+                if shutdown_flag.load(Ordering::Acquire) {
                     break;
                 }
 
@@ -167,6 +174,10 @@ fn run_pw_loop(
         known_stream_ids: HashSet::new(),
         known_capture_ids: HashSet::new(),
         shutdown: false,
+        level_monitoring: config.broadcast_levels,
+        level_listeners: HashMap::new(),
+        level_peaks: HashMap::new(),
+        level_last_sent: Instant::now(),
     }));
 
     // Listen for registry events
@@ -283,6 +294,14 @@ struct PwState {
     known_stream_ids: HashSet<u32>,
     known_capture_ids: HashSet<u32>,
     shutdown: bool,
+    /// Level monitoring state
+    level_monitoring: bool,
+    /// Param listeners for level monitoring, keyed by input_id
+    level_listeners: HashMap<u32, Box<dyn std::any::Any>>,
+    /// Cached peak levels per input_id
+    level_peaks: HashMap<u32, f32>,
+    /// Last time levels were sent to tokio
+    level_last_sent: Instant,
 }
 
 struct PwNodeState {
@@ -518,6 +537,9 @@ fn handle_command(
             if let Some(lb) = s.capture_loopbacks.remove(&input_id) {
                 destroy_module(lb._module_ptr);
             }
+            // Clean up level listener
+            s.level_listeners.remove(&input_id);
+            s.level_peaks.remove(&input_id);
             // Destroy input sink
             if s.input_sinks.remove(&input_id).is_some() {
                 event_sender
@@ -693,6 +715,33 @@ fn handle_command(
             }
         }
 
+        PwCommand::EnableLevelMonitoring => {
+            let mut s = state.borrow_mut();
+            if s.level_monitoring {
+                return;
+            }
+            s.level_monitoring = true;
+            info!("level monitoring enabled");
+
+            // Attach param listeners to all existing input sinks
+            let input_ids: Vec<u32> = s.input_sinks.keys().cloned().collect();
+            drop(s);
+            for input_id in input_ids {
+                attach_level_listener(state, event_sender, input_id);
+            }
+        }
+
+        PwCommand::DisableLevelMonitoring => {
+            let mut s = state.borrow_mut();
+            if !s.level_monitoring {
+                return;
+            }
+            s.level_monitoring = false;
+            s.level_listeners.clear();
+            s.level_peaks.clear();
+            info!("level monitoring disabled");
+        }
+
         PwCommand::Shutdown {
             original_default_sink,
             original_stream_targets,
@@ -807,6 +856,11 @@ fn create_input_sink(
                 },
             );
             debug!("created input sink: {node_name} ({description})");
+
+            // Auto-attach level listener if monitoring is enabled
+            if state.borrow().level_monitoring {
+                attach_level_listener(state, event_sender, input_id);
+            }
         }
         Err(e) => {
             error!("failed to create input sink {node_name}: {e}");
@@ -1069,6 +1123,59 @@ fn create_capture_loopback(
         },
     );
     debug!("created capture loopback: {capture_device_name} → {input_sink_name}");
+}
+
+/// Attach a param listener to an input sink node for level monitoring.
+/// The listener receives monitorVolumes updates from PipeWire, reduces to mono peak,
+/// and batches updates to send at ~20Hz via PwEvent::LevelUpdate.
+fn attach_level_listener(
+    state: &Rc<RefCell<PwState>>,
+    event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
+    input_id: u32,
+) {
+    let s = state.borrow();
+    let node = match s.input_sinks.get(&input_id) {
+        Some(ns) => &ns._proxy,
+        None => return,
+    };
+
+    // Subscribe to Props params so PipeWire pushes monitorVolumes updates
+    node.subscribe_params(&[ParamType::Props]);
+
+    let level_state = state.clone();
+    let level_ev = event_sender.clone();
+    let listener = node
+        .add_listener_local()
+        .param(move |_seq, _param_id, _index, _next, param| {
+            if let Some(pod) = param {
+                if let Ok(value) = pipewire::spa::pod::deserialize::PodDeserializer::deserialize_any_from(pod.as_bytes()) {
+                    if let Value::Object(obj) = value.1 {
+                        for prop in &obj.properties {
+                            if prop.key == SPA_PROP_MONITOR_VOLUMES {
+                                if let Value::ValueArray(ValueArray::Float(volumes)) = &prop.value {
+                                    let peak = volumes.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
+                                    let mut ls = level_state.borrow_mut();
+                                    ls.level_peaks.insert(input_id, peak);
+
+                                    // Throttle: only send if enough time has passed
+                                    let now = Instant::now();
+                                    if now.duration_since(ls.level_last_sent).as_millis() >= LEVEL_THROTTLE_MS {
+                                        ls.level_last_sent = now;
+                                        let levels: Vec<(u32, f32)> = ls.level_peaks.iter().map(|(&id, &lvl)| (id, lvl)).collect();
+                                        drop(ls);
+                                        level_ev.send(PwEvent::LevelUpdate { levels }).ok();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .register();
+
+    drop(s);
+    state.borrow_mut().level_listeners.insert(input_id, Box::new(listener));
 }
 
 /// Update channel volumes on a node in-place via set_param, avoiding module destroy/recreate.
