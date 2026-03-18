@@ -1,6 +1,7 @@
 mod capture;
 mod dbus;
 mod rules;
+mod settings;
 mod sidebar;
 mod streams;
 mod strips;
@@ -62,10 +63,12 @@ fn build_ui(app: &adw::Application, config: &UiConfig) {
 
     let rules_button = gtk4::Button::with_label("Rules");
     let devices_button = gtk4::Button::with_label("Devices");
+    let settings_button = gtk4::Button::with_label("Settings");
 
     let header = adw::HeaderBar::builder()
         .title_widget(&title_box)
         .build();
+    header.pack_end(&settings_button);
     header.pack_end(&devices_button);
     header.pack_end(&rules_button);
 
@@ -81,6 +84,7 @@ fn build_ui(app: &adw::Application, config: &UiConfig) {
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vscrollbar_policy(gtk4::PolicyType::Automatic)
         .vexpand(true)
+        .hexpand(false)
         .child(&sidebar_box)
         .build();
 
@@ -116,6 +120,7 @@ fn build_ui(app: &adw::Application, config: &UiConfig) {
 
     // -- Main vertical layout (strips + streams) --
     let main_vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    main_vbox.set_hexpand(true);
     main_vbox.append(&main_scrolled);
     let streams_sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
     main_vbox.append(&streams_sep);
@@ -156,6 +161,7 @@ fn build_ui(app: &adw::Application, config: &UiConfig) {
         #[weak] status_label,
         #[weak] rules_button,
         #[weak] devices_button,
+        #[weak] settings_button,
         #[weak] window,
         #[strong] widget_map,
         #[strong] selected_output_id,
@@ -168,6 +174,7 @@ fn build_ui(app: &adw::Application, config: &UiConfig) {
                 status_label,
                 rules_button,
                 devices_button,
+                settings_button,
                 window,
                 widget_map,
                 selected_output_id,

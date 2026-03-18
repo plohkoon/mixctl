@@ -10,11 +10,12 @@ use tracing::{info, warn};
 use crate::audio::{PwCommand, PwEvent};
 use crate::audio::volume::combine_pw_volume;
 use crate::config::{ChannelConfig, ConfigFile};
-use crate::state::{CaptureDeviceState, OutputState, RouteState, StateFile, StreamState};
+use crate::state::{CaptureDeviceState, OutputState, PlaybackDeviceState, RouteState, StateFile, StreamState};
 
 pub enum ServiceSignal {
     AudioStatusChanged,
     CaptureDevicesChanged,
+    PlaybackDevicesChanged,
     StreamsChanged,
     InputLevelsChanged { levels: Vec<(u32, f64)> },
     BroadcastLevelsChanged { enabled: bool },
@@ -29,6 +30,9 @@ impl ServiceSignal {
             }
             Self::CaptureDevicesChanged => {
                 Service::emit_capture_devices_changed(emitter).await.ok();
+            }
+            Self::PlaybackDevicesChanged => {
+                Service::emit_playback_devices_changed(emitter).await.ok();
             }
             Self::StreamsChanged => {
                 Service::emit_streams_changed(emitter).await.ok();
@@ -61,6 +65,7 @@ pub struct Shared {
     pub audio_connected: bool,
     pub active_streams: HashMap<u32, StreamState>,
     pub capture_devices: HashMap<u32, CaptureDeviceState>,
+    pub playback_devices: HashMap<u32, PlaybackDeviceState>,
     pub original_default_sink: Option<String>,
     pub original_stream_targets: HashMap<u32, String>,
     pub input_levels: HashMap<u32, f32>,
@@ -141,6 +146,7 @@ impl Service {
                 audio_connected: false,
                 active_streams: HashMap::new(),
                 capture_devices: HashMap::new(),
+                playback_devices: HashMap::new(),
                 original_default_sink: None,
                 original_stream_targets: HashMap::new(),
                 input_levels: HashMap::new(),
@@ -163,6 +169,7 @@ impl Service {
             color: cfg.color.clone(),
             volume: state.volume,
             muted: state.muted,
+            target_device: cfg.target_device.clone().unwrap_or_default(),
         }
     }
 
@@ -273,6 +280,28 @@ impl Service {
                 let mut shared = self.inner.lock().await;
                 shared.capture_devices.remove(&pw_node_id);
                 shared.signal_tx.send(ServiceSignal::CaptureDevicesChanged).ok();
+            }
+            PwEvent::PlaybackDeviceAppeared {
+                pw_node_id,
+                name,
+                device_name,
+            } => {
+                info!("playback device appeared: node={pw_node_id} name={name} device={device_name}");
+                let mut shared = self.inner.lock().await;
+                shared.playback_devices.insert(
+                    pw_node_id,
+                    PlaybackDeviceState {
+                        name,
+                        device_name,
+                    },
+                );
+                shared.signal_tx.send(ServiceSignal::PlaybackDevicesChanged).ok();
+            }
+            PwEvent::PlaybackDeviceRemoved { pw_node_id } => {
+                info!("playback device removed: node={pw_node_id}");
+                let mut shared = self.inner.lock().await;
+                shared.playback_devices.remove(&pw_node_id);
+                shared.signal_tx.send(ServiceSignal::PlaybackDevicesChanged).ok();
             }
             PwEvent::OriginalDefaultSink { value } => {
                 let mut shared = self.inner.lock().await;

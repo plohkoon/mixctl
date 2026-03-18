@@ -1,4 +1,4 @@
-use crate::{AppRuleInfo, CaptureDeviceInfo, InputInfo, OutputInfo, RouteInfo, StreamInfo};
+use crate::{AppRuleInfo, CaptureDeviceInfo, InputInfo, OutputInfo, PlaybackDeviceInfo, RouteInfo, StreamInfo};
 
 pub const BUS_NAME: &str = "dev.greghuber.MixCtl";
 pub const OBJ_PATH: &str = "/dev/greghuber/MixCtl1";
@@ -57,6 +57,10 @@ pub trait MixCtl {
     // Capture Devices (Phase 4)
     fn list_capture_devices(&self) -> zbus::Result<Vec<CaptureDeviceInfo>>;
     fn add_capture_input(&self, pw_node_id: u32, name: &str, color: &str) -> zbus::Result<u32>;
+    fn bind_capture_to_input(&self, input_id: u32, device_name: &str) -> zbus::Result<()>;
+
+    // Playback Devices
+    fn list_playback_devices(&self) -> zbus::Result<Vec<PlaybackDeviceInfo>>;
 
     // Page
     fn get_current_page(&self) -> zbus::Result<u32>;
@@ -98,6 +102,9 @@ pub trait MixCtl {
 
     #[zbus(signal)]
     fn capture_devices_changed(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn playback_devices_changed(&self) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn input_levels_changed(&self, levels: Vec<(u32, f64)>) -> zbus::Result<()>;

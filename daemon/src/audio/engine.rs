@@ -173,6 +173,7 @@ fn run_pw_loop(
         deferred_default_input: config.default_input_id,
         known_stream_ids: HashSet::new(),
         known_capture_ids: HashSet::new(),
+        known_playback_ids: HashSet::new(),
         shutdown: false,
         level_monitoring: config.broadcast_levels,
         level_listeners: HashMap::new(),
@@ -201,6 +202,8 @@ fn run_pw_loop(
                     ev.send(PwEvent::StreamRemoved { pw_node_id: id }).ok();
                 } else if s.known_capture_ids.remove(&id) {
                     ev.send(PwEvent::CaptureDeviceRemoved { pw_node_id: id }).ok();
+                } else if s.known_playback_ids.remove(&id) {
+                    ev.send(PwEvent::PlaybackDeviceRemoved { pw_node_id: id }).ok();
                 }
             }
         })
@@ -293,6 +296,7 @@ struct PwState {
     deferred_default_input: Option<u32>,
     known_stream_ids: HashSet<u32>,
     known_capture_ids: HashSet<u32>,
+    known_playback_ids: HashSet<u32>,
     shutdown: bool,
     /// Level monitoring state
     level_monitoring: bool,
@@ -433,9 +437,11 @@ fn handle_node_global(
     match media_class {
         "Stream/Output/Audio" => {
             let node_name = props.get("node.name").unwrap_or("");
+            // PipeWire's loopback module may prefix playback node names with "output."
+            let effective_name = node_name.strip_prefix("output.").unwrap_or(node_name);
 
             // Track route loopback playback nodes for in-place volume updates (D2)
-            if let Some(route_suffix) = node_name.strip_prefix("mixctl.route.") {
+            if let Some(route_suffix) = effective_name.strip_prefix("mixctl.route.") {
                 if let Some((iid, oid)) = parse_route_ids(route_suffix) {
                     match registry.bind::<Node, _>(global) {
                         Ok(node) => {
@@ -453,7 +459,7 @@ fn handle_node_global(
             }
 
             // Filter out all other mixctl.* nodes from stream detection (M4)
-            if node_name.starts_with("mixctl.") {
+            if effective_name.starts_with("mixctl.") {
                 return;
             }
 
@@ -485,6 +491,25 @@ fn handle_node_global(
             state.borrow_mut().known_capture_ids.insert(global.id);
             event_sender
                 .send(PwEvent::CaptureDeviceAppeared {
+                    pw_node_id: global.id,
+                    name,
+                    device_name: node_name.to_string(),
+                })
+                .ok();
+        }
+        "Audio/Sink" => {
+            let node_name = props.get("node.name").unwrap_or("");
+            if node_name.starts_with("mixctl.") {
+                return;
+            }
+            let name = props
+                .get("node.description")
+                .or_else(|| props.get("node.nick"))
+                .unwrap_or(node_name)
+                .to_string();
+            state.borrow_mut().known_playback_ids.insert(global.id);
+            event_sender
+                .send(PwEvent::PlaybackDeviceAppeared {
                     pw_node_id: global.id,
                     name,
                     device_name: node_name.to_string(),
@@ -692,6 +717,14 @@ fn handle_command(
             capture_device_name,
         } => {
             create_input_sink(state, event_sender, core, input_id, &description);
+            let input_sink_name = format!("mixctl.input.{input_id}");
+            create_capture_loopback(state, context, input_id, &capture_device_name, &input_sink_name, 1.0);
+        }
+
+        PwCommand::BindCaptureToInput {
+            input_id,
+            capture_device_name,
+        } => {
             let input_sink_name = format!("mixctl.input.{input_id}");
             create_capture_loopback(state, context, input_id, &capture_device_name, &input_sink_name, 1.0);
         }

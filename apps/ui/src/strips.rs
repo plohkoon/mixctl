@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -15,6 +15,7 @@ pub(crate) struct RouteWidgets {
     pub volume_label: gtk4::Label,
     pub mute_button: gtk4::ToggleButton,
     pub name_label: gtk4::Label,
+    pub updating: Rc<Cell<bool>>,
 }
 
 pub(crate) type WidgetMap = Rc<RefCell<HashMap<u32, RouteWidgets>>>;
@@ -101,6 +102,12 @@ fn build_route_strip(
     color_bar.set_hexpand(true);
     strip.append(&color_bar);
 
+    // Volume label (created before scale so we can reference it in the callback)
+    let volume_label = gtk4::Label::new(Some(&format!("{}%", route.volume)));
+
+    // Guard flag to prevent feedback loop when updating from D-Bus signals
+    let updating = Rc::new(Cell::new(false));
+
     // Vertical volume slider
     let scale = gtk4::Scale::with_range(gtk4::Orientation::Vertical, 0.0, 100.0, 1.0);
     scale.set_inverted(true);
@@ -110,8 +117,15 @@ fn build_route_strip(
     let input_id = inp.id;
     scale.connect_value_changed(clone!(
         #[strong] proxy,
+        #[strong] updating,
+        #[weak] volume_label,
         move |scale| {
+            // Skip D-Bus call if this change was triggered by update_route_strip
+            if updating.get() {
+                return;
+            }
             let vol = scale.value() as u8;
+            volume_label.set_label(&format!("{}%", vol));
             let proxy = proxy.clone();
             glib::spawn_future_local(async move {
                 proxy.set_route_volume(input_id, output_id, vol).await.ok();
@@ -121,7 +135,6 @@ fn build_route_strip(
     strip.append(&scale);
 
     // Volume label
-    let volume_label = gtk4::Label::new(Some(&format!("{}%", route.volume)));
     strip.append(&volume_label);
 
     // Mute toggle
@@ -129,7 +142,11 @@ fn build_route_strip(
     mute_button.set_active(route.muted);
     mute_button.connect_toggled(clone!(
         #[strong] proxy,
+        #[strong] updating,
         move |btn| {
+            if updating.get() {
+                return;
+            }
             let muted = btn.is_active();
             btn.set_label(if muted { "Unmute" } else { "Mute" });
             let proxy = proxy.clone();
@@ -185,15 +202,18 @@ fn build_route_strip(
         volume_label,
         mute_button,
         name_label,
+        updating,
     });
 }
 
 pub(crate) fn update_route_strip(route: &RouteInfo, widget_map: &WidgetMap) {
     let map = widget_map.borrow();
     if let Some(widgets) = map.get(&route.input_id) {
+        widgets.updating.set(true);
         widgets.scale.set_value(route.volume as f64);
         widgets.volume_label.set_label(&format!("{}%", route.volume));
         widgets.mute_button.set_active(route.muted);
         widgets.mute_button.set_label(if route.muted { "Unmute" } else { "Mute" });
+        widgets.updating.set(false);
     }
 }

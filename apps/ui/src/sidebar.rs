@@ -5,7 +5,7 @@ use gtk4::glib;
 use gtk4::glib::clone;
 use gtk4::prelude::*;
 use mixctl_core::dbus::MixCtlProxy;
-use mixctl_core::{InputInfo, OutputInfo};
+use mixctl_core::{InputInfo, OutputInfo, PlaybackDeviceInfo};
 
 use crate::strips::{load_routes_for_output, WidgetMap};
 
@@ -19,6 +19,7 @@ pub(crate) fn rebuild_sidebar(
     widget_map: &WidgetMap,
     css_provider: &gtk4::CssProvider,
     proxy: &MixCtlProxy<'static>,
+    playback_devices: &[PlaybackDeviceInfo],
 ) {
     while let Some(child) = sidebar_box.first_child() {
         sidebar_box.remove(&child);
@@ -69,8 +70,37 @@ pub(crate) fn rebuild_sidebar(
 
     for out in outputs {
         let is_selected = out.id == selected_output_id.get();
+
+        let output_row = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+
         let btn = gtk4::Button::new();
         let btn_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+
+        // Color picker button
+        let color_dialog = gtk4::ColorDialog::new();
+        let rgba = gtk4::gdk::RGBA::parse(&out.color)
+            .unwrap_or_else(|_| gtk4::gdk::RGBA::new(0.5, 0.5, 0.5, 1.0));
+        let color_btn = gtk4::ColorDialogButton::new(Some(color_dialog));
+        color_btn.set_rgba(&rgba);
+        btn_box.append(&color_btn);
+
+        let output_id = out.id;
+        color_btn.connect_rgba_notify(clone!(
+            #[strong] proxy,
+            move |btn: &gtk4::ColorDialogButton| {
+                let rgba = btn.rgba();
+                let hex = format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (rgba.red() * 255.0) as u8,
+                    (rgba.green() * 255.0) as u8,
+                    (rgba.blue() * 255.0) as u8,
+                );
+                let proxy = proxy.clone();
+                glib::spawn_future_local(async move {
+                    proxy.set_output_color(output_id, &hex).await.ok();
+                });
+            }
+        ));
 
         let name_label = gtk4::Label::new(Some(&out.name));
         name_label.set_hexpand(true);
@@ -86,7 +116,6 @@ pub(crate) fn rebuild_sidebar(
             btn.add_css_class("suggested-action");
         }
 
-        let output_id = out.id;
         btn.connect_clicked(clone!(
             #[strong] selected_output_id,
             #[weak] strips_box,
@@ -105,6 +134,7 @@ pub(crate) fn rebuild_sidebar(
                     #[strong] css_provider,
                     #[strong] proxy_clone,
                     async move {
+                        let playback_devices = proxy_clone.list_playback_devices().await.unwrap_or_default();
                         if let Ok(outputs) = proxy_clone.list_outputs().await {
                             let inputs = proxy_clone.list_inputs().await.unwrap_or_default();
                             let default_input_id =
@@ -119,6 +149,7 @@ pub(crate) fn rebuild_sidebar(
                                 &widget_map,
                                 &css_provider,
                                 &proxy_clone,
+                                &playback_devices,
                             );
                         }
                         load_routes_for_output(
@@ -134,6 +165,42 @@ pub(crate) fn rebuild_sidebar(
             }
         ));
 
-        sidebar_box.append(&btn);
+        output_row.append(&btn);
+
+        // Hardware target dropdown
+        let mut device_names: Vec<String> = vec!["None".to_string()];
+        device_names.extend(playback_devices.iter().map(|d| d.name.clone()));
+        let device_strs: Vec<&str> = device_names.iter().map(|s| s.as_str()).collect();
+        let target_dropdown = gtk4::DropDown::from_strings(&device_strs);
+
+        // Pre-select current target
+        let current_target = &out.target_device;
+        if !current_target.is_empty() {
+            if let Some(pos) = playback_devices.iter().position(|d| d.device_name == *current_target) {
+                target_dropdown.set_selected((pos + 1) as u32); // +1 for "None" entry
+            }
+        }
+
+        let playback_devices_clone: Vec<PlaybackDeviceInfo> = playback_devices.to_vec();
+        target_dropdown.connect_selected_notify(clone!(
+            #[strong] proxy,
+            move |dd| {
+                let selected = dd.selected() as usize;
+                let device_name = if selected == 0 {
+                    String::new()
+                } else {
+                    playback_devices_clone.get(selected - 1)
+                        .map(|d| d.device_name.clone())
+                        .unwrap_or_default()
+                };
+                let proxy = proxy.clone();
+                glib::spawn_future_local(async move {
+                    proxy.set_output_target(output_id, &device_name).await.ok();
+                });
+            }
+        ));
+        output_row.append(&target_dropdown);
+
+        sidebar_box.append(&output_row);
     }
 }

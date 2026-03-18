@@ -23,6 +23,13 @@ pub struct CaptureDeviceState {
     pub device_name: String,
 }
 
+/// Runtime state for a discovered playback device (not persisted).
+#[derive(Debug, Clone)]
+pub struct PlaybackDeviceState {
+    pub name: String,
+    pub device_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateFile {
     pub version: u32,

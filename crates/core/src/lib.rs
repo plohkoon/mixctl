@@ -17,6 +17,7 @@ pub struct OutputInfo {
     pub color: String,
     pub volume: u8,
     pub muted: bool,
+    pub target_device: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -48,6 +49,13 @@ pub struct CaptureDeviceInfo {
     pub device_name: String,
     pub is_added: bool,
     pub input_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PlaybackDeviceInfo {
+    pub pw_node_id: u32,
+    pub name: String,
+    pub device_name: String,
 }
 
 /// Parse a "#RRGGBB" hex color string into (R, G, B) components.

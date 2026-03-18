@@ -1,5 +1,6 @@
 use mixctl_core::{
-    AppRuleInfo, CaptureDeviceInfo, InputInfo, OutputInfo, RouteInfo, StreamInfo, parse_hex_color,
+    AppRuleInfo, CaptureDeviceInfo, InputInfo, OutputInfo, PlaybackDeviceInfo, RouteInfo,
+    StreamInfo, parse_hex_color,
 };
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
@@ -868,6 +869,22 @@ impl Service {
         Ok(id)
     }
 
+    // -- Playback Devices --
+
+    async fn list_playback_devices(&self) -> zbus::fdo::Result<Vec<PlaybackDeviceInfo>> {
+        let shared = self.inner.lock().await;
+        let devices: Vec<PlaybackDeviceInfo> = shared
+            .playback_devices
+            .iter()
+            .map(|(&pw_node_id, state)| PlaybackDeviceInfo {
+                pw_node_id,
+                name: state.name.clone(),
+                device_name: state.device_name.clone(),
+            })
+            .collect();
+        Ok(devices)
+    }
+
     async fn remove_capture_input(
         &self,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
@@ -889,6 +906,41 @@ impl Service {
             &shared,
             PwCommand::DestroyCaptureLoopback { input_id: id },
         );
+        drop(shared);
+        Self::inputs_config_changed(&emitter).await.ok();
+        Ok(())
+    }
+
+    async fn bind_capture_to_input(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        input_id: u32,
+        device_name: &str,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        let cfg = shared
+            .config
+            .find_input_mut(input_id)
+            .ok_or_else(|| zbus::fdo::Error::Failed(format!("input id {} not found", input_id)))?;
+        if cfg.capture_device.is_some() {
+            return Err(zbus::fdo::Error::Failed(
+                "input already has a capture device bound".into(),
+            ));
+        }
+        cfg.capture_device = Some(device_name.to_string());
+        shared.state.ensure_capture_volume(input_id);
+        shared.config_dirty = true;
+        shared.state_dirty = true;
+
+        // Create only the capture loopback (input sink already exists)
+        Service::send_pw_cmd(
+            &shared,
+            PwCommand::BindCaptureToInput {
+                input_id,
+                capture_device_name: device_name.to_string(),
+            },
+        );
+
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
         Ok(())
@@ -1148,6 +1200,9 @@ impl Service {
     async fn capture_devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 
     #[zbus(signal)]
+    async fn playback_devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
     async fn input_levels_changed(
         emitter: &SignalEmitter<'_>,
         levels: Vec<(u32, f64)>,
@@ -1174,6 +1229,10 @@ impl Service {
 
     pub async fn emit_capture_devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()> {
         Self::capture_devices_changed(emitter).await
+    }
+
+    pub async fn emit_playback_devices_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()> {
+        Self::playback_devices_changed(emitter).await
     }
 
     pub async fn emit_streams_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()> {

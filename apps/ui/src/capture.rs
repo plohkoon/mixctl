@@ -11,8 +11,8 @@ pub(crate) fn show_capture_dialog(
     let dialog = gtk4::Window::builder()
         .modal(true)
         .title("Capture Devices")
-        .default_width(450)
-        .default_height(350)
+        .default_width(500)
+        .default_height(400)
         .build();
     dialog.set_transient_for(Some(parent));
 
@@ -67,6 +67,7 @@ async fn rebuild_devices_list(list_box: &gtk4::ListBox, proxy: &MixCtlProxy<'sta
     }
 
     let devices = proxy.list_capture_devices().await.unwrap_or_default();
+    let inputs = proxy.list_inputs().await.unwrap_or_default();
 
     if devices.is_empty() {
         let empty = gtk4::Label::new(Some("No capture devices found"));
@@ -78,6 +79,14 @@ async fn rebuild_devices_list(list_box: &gtk4::ListBox, proxy: &MixCtlProxy<'sta
         list_box.append(&row);
         return;
     }
+
+    // Find inputs that don't already have a capture device bound
+    let unbound_inputs: Vec<_> = inputs
+        .iter()
+        .filter(|i| {
+            !devices.iter().any(|d| d.is_added && d.input_id == i.id)
+        })
+        .collect();
 
     for dev in &devices {
         let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
@@ -103,6 +112,9 @@ async fn rebuild_devices_list(list_box: &gtk4::ListBox, proxy: &MixCtlProxy<'sta
             added_label.add_css_class("dim-label");
             row_box.append(&added_label);
         } else {
+            let action_box = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+
+            // "Add as new input" row
             let add_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
             let name_entry = gtk4::Entry::builder()
                 .text(&dev.name)
@@ -112,7 +124,7 @@ async fn rebuild_devices_list(list_box: &gtk4::ListBox, proxy: &MixCtlProxy<'sta
                 .text("#4A90D9")
                 .width_chars(8)
                 .build();
-            let add_btn = gtk4::Button::with_label("Add");
+            let add_btn = gtk4::Button::with_label("Add New");
 
             let pw_node_id = dev.pw_node_id;
             add_btn.connect_clicked(clone!(
@@ -140,7 +152,50 @@ async fn rebuild_devices_list(list_box: &gtk4::ListBox, proxy: &MixCtlProxy<'sta
             add_box.append(&name_entry);
             add_box.append(&color_entry);
             add_box.append(&add_btn);
-            row_box.append(&add_box);
+            action_box.append(&add_box);
+
+            // "Bind to existing input" row (only if there are unbound inputs)
+            if !unbound_inputs.is_empty() {
+                let bind_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+                let bind_label = gtk4::Label::new(Some("or bind to:"));
+                bind_label.add_css_class("dim-label");
+                bind_box.append(&bind_label);
+
+                let input_names: Vec<&str> =
+                    unbound_inputs.iter().map(|i| i.name.as_str()).collect();
+                let bind_dropdown = gtk4::DropDown::from_strings(&input_names);
+                bind_box.append(&bind_dropdown);
+
+                let bind_btn = gtk4::Button::with_label("Bind");
+                let unbound_ids: Vec<u32> = unbound_inputs.iter().map(|i| i.id).collect();
+                let device_name = dev.device_name.clone();
+                bind_btn.connect_clicked(clone!(
+                    #[strong] proxy,
+                    #[weak] list_box,
+                    #[weak] bind_dropdown,
+                    move |_| {
+                        let selected = bind_dropdown.selected() as usize;
+                        if let Some(&input_id) = unbound_ids.get(selected) {
+                            let device_name = device_name.clone();
+                            let proxy = proxy.clone();
+                            glib::spawn_future_local(clone!(
+                                #[weak] list_box,
+                                async move {
+                                    proxy
+                                        .bind_capture_to_input(input_id, &device_name)
+                                        .await
+                                        .ok();
+                                    rebuild_devices_list(&list_box, &proxy).await;
+                                }
+                            ));
+                        }
+                    }
+                ));
+                bind_box.append(&bind_btn);
+                action_box.append(&bind_box);
+            }
+
+            row_box.append(&action_box);
         }
 
         let row = gtk4::ListBoxRow::new();

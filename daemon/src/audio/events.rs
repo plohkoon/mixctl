@@ -50,6 +50,16 @@ pub enum PwEvent {
         pw_node_id: u32,
     },
 
+    // -- Playback devices --
+    PlaybackDeviceAppeared {
+        pw_node_id: u32,
+        name: String,
+        device_name: String,
+    },
+    PlaybackDeviceRemoved {
+        pw_node_id: u32,
+    },
+
     // -- Original state (for shutdown restoration) --
     OriginalDefaultSink {
         value: Option<String>,
@@ -126,6 +136,18 @@ impl std::fmt::Debug for PwEvent {
             }
             Self::CaptureDeviceRemoved { pw_node_id } => {
                 f.debug_struct("CaptureDeviceRemoved")
+                    .field("pw_node_id", pw_node_id)
+                    .finish()
+            }
+            Self::PlaybackDeviceAppeared { pw_node_id, name, device_name } => {
+                f.debug_struct("PlaybackDeviceAppeared")
+                    .field("pw_node_id", pw_node_id)
+                    .field("name", name)
+                    .field("device_name", device_name)
+                    .finish()
+            }
+            Self::PlaybackDeviceRemoved { pw_node_id } => {
+                f.debug_struct("PlaybackDeviceRemoved")
                     .field("pw_node_id", pw_node_id)
                     .finish()
             }

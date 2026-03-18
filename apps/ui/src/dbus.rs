@@ -9,6 +9,7 @@ use mixctl_core::dbus::MixCtlProxy;
 
 use crate::capture;
 use crate::rules;
+use crate::settings;
 use crate::sidebar::rebuild_sidebar;
 use crate::streams::rebuild_streams_panel;
 use crate::strips::{load_routes_for_output, update_route_strip, WidgetMap};
@@ -20,6 +21,7 @@ pub(crate) async fn connect_and_subscribe(
     status_label: gtk4::Label,
     rules_button: gtk4::Button,
     devices_button: gtk4::Button,
+    settings_button: gtk4::Button,
     window: adw::ApplicationWindow,
     widget_map: WidgetMap,
     selected_output_id: Rc<Cell<u32>>,
@@ -37,6 +39,7 @@ pub(crate) async fn connect_and_subscribe(
     let outputs = proxy.list_outputs().await.unwrap_or_default();
     let inputs = proxy.list_inputs().await.unwrap_or_default();
     let default_input_id = proxy.get_default_input().await.unwrap_or(0);
+    let playback_devices = proxy.list_playback_devices().await.unwrap_or_default();
     if !outputs.is_empty() {
         selected_output_id.set(outputs[0].id);
     }
@@ -50,6 +53,7 @@ pub(crate) async fn connect_and_subscribe(
         &widget_map,
         &css_provider,
         &proxy,
+        &playback_devices,
     );
     load_routes_for_output(
         &strips_box,
@@ -79,6 +83,14 @@ pub(crate) async fn connect_and_subscribe(
         #[weak] window,
         move |_| {
             capture::show_capture_dialog(&window, &proxy);
+        }
+    ));
+
+    settings_button.connect_clicked(clone!(
+        #[strong] proxy,
+        #[weak] window,
+        move |_| {
+            settings::show_settings_dialog(&window, &proxy);
         }
     ));
 
@@ -147,6 +159,7 @@ pub(crate) async fn connect_and_subscribe(
                 if let Ok(outputs) = proxy.list_outputs().await {
                     let inputs = proxy.list_inputs().await.unwrap_or_default();
                     let default_input_id = proxy.get_default_input().await.unwrap_or(0);
+                    let playback_devices = proxy.list_playback_devices().await.unwrap_or_default();
                     rebuild_sidebar(
                         &sidebar_box,
                         &outputs,
@@ -157,6 +170,7 @@ pub(crate) async fn connect_and_subscribe(
                         &widget_map,
                         &css_provider,
                         &proxy,
+                        &playback_devices,
                     );
                 }
             }
@@ -188,6 +202,7 @@ pub(crate) async fn connect_and_subscribe(
                 if let Ok(outputs) = proxy.list_outputs().await {
                     let inputs = proxy.list_inputs().await.unwrap_or_default();
                     let default_input_id = proxy.get_default_input().await.unwrap_or(0);
+                    let playback_devices = proxy.list_playback_devices().await.unwrap_or_default();
                     rebuild_sidebar(
                         &sidebar_box,
                         &outputs,
@@ -198,6 +213,7 @@ pub(crate) async fn connect_and_subscribe(
                         &widget_map,
                         &css_provider,
                         &proxy,
+                        &playback_devices,
                     );
                     if let Ok(streams) = proxy.list_streams().await {
                         rebuild_streams_panel(&streams_box, &streams, &inputs);
@@ -228,6 +244,7 @@ pub(crate) async fn connect_and_subscribe(
                     }
                     let inputs = proxy.list_inputs().await.unwrap_or_default();
                     let default_input_id = proxy.get_default_input().await.unwrap_or(0);
+                    let playback_devices = proxy.list_playback_devices().await.unwrap_or_default();
                     rebuild_sidebar(
                         &sidebar_box,
                         &outputs,
@@ -238,6 +255,7 @@ pub(crate) async fn connect_and_subscribe(
                         &widget_map,
                         &css_provider,
                         &proxy,
+                        &playback_devices,
                     );
                     load_routes_for_output(
                         &strips_box,
@@ -247,6 +265,39 @@ pub(crate) async fn connect_and_subscribe(
                         selected_output_id.get(),
                     )
                     .await;
+                }
+            }
+        }
+    ));
+
+    // Listen for playback devices changes → refresh sidebar to update target dropdowns
+    glib::spawn_future_local(clone!(
+        #[weak] sidebar_box,
+        #[weak] strips_box,
+        #[strong] widget_map,
+        #[strong] selected_output_id,
+        #[strong] css_provider,
+        #[strong] proxy,
+        async move {
+            use futures_lite::StreamExt;
+            let mut stream = proxy.receive_playback_devices_changed().await.unwrap();
+            while let Some(_) = stream.next().await {
+                if let Ok(outputs) = proxy.list_outputs().await {
+                    let inputs = proxy.list_inputs().await.unwrap_or_default();
+                    let default_input_id = proxy.get_default_input().await.unwrap_or(0);
+                    let playback_devices = proxy.list_playback_devices().await.unwrap_or_default();
+                    rebuild_sidebar(
+                        &sidebar_box,
+                        &outputs,
+                        &inputs,
+                        default_input_id,
+                        &selected_output_id,
+                        &strips_box,
+                        &widget_map,
+                        &css_provider,
+                        &proxy,
+                        &playback_devices,
+                    );
                 }
             }
         }

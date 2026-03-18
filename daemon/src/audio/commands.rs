@@ -58,6 +58,11 @@ pub enum PwCommand {
         description: String,
         capture_device_name: String,
     },
+    /// Bind a capture device to an existing input (only creates the capture loopback).
+    BindCaptureToInput {
+        input_id: u32,
+        capture_device_name: String,
+    },
     DestroyCaptureLoopback {
         input_id: u32,
     },
