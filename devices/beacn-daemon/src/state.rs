@@ -47,10 +47,6 @@ fn route_key(input_id: u32, output_id: u32) -> String {
 }
 
 impl BeacnState {
-    pub fn new() -> Self {
-        Self::new_with_config(2, 0.8)
-    }
-
     pub fn new_with_config(dial_sensitivity: u32, level_decay: f64) -> Self {
         Self {
             inputs: Vec::new(),

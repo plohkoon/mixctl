@@ -1,5 +1,6 @@
 /// Commands sent from the tokio side to the PipeWire thread.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum PwCommand {
     // -- Phase 1: Input sinks --
     CreateInputSink {

@@ -844,6 +844,7 @@ impl Service {
         });
         let output_ids: Vec<u32> = shared.config.outputs.iter().map(|o| o.id()).collect();
         shared.state.ensure_routes_for_input(id, &output_ids);
+        shared.state.ensure_capture_volume(id);
         shared.config_dirty = true;
         shared.state_dirty = true;
 

@@ -16,6 +16,7 @@ pub fn combine_pw_volume(route_vol: u8, route_muted: bool, output_vol: u8, outpu
 }
 
 /// Convert PipeWire's f32 cubic volume back to u8 (0-100).
+#[allow(dead_code)]
 pub fn pw_volume_to_u8(v: f32) -> u8 {
     (v.cbrt() * 100.0).round().clamp(0.0, 100.0) as u8
 }

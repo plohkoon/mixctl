@@ -192,6 +192,27 @@ impl StateFile {
             keep
         });
 
+        // Ensure CaptureVolumeState for each input with a capture device
+        let capture_input_ids: Vec<String> = config.inputs.iter()
+            .filter(|i| i.capture_device.is_some())
+            .map(|i| i.id().to_string())
+            .collect();
+        for key in &capture_input_ids {
+            if !self.capture_volumes.contains_key(key) {
+                self.capture_volumes.insert(key.clone(), CaptureVolumeState::default());
+                changed = true;
+            }
+        }
+
+        // Remove stale capture volume entries
+        self.capture_volumes.retain(|key, _| {
+            let keep = capture_input_ids.contains(key);
+            if !keep {
+                changed = true;
+            }
+            keep
+        });
+
         // Clamp page
         let max = config.max_page();
         if self.current_page > max {
