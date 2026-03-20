@@ -1,0 +1,98 @@
+import { Slider } from "std-widgets.slint";
+
+export struct StreamData {
+    pw-node-id: int,
+    app-name: string,
+    input-name: string,
+    input-color: color,
+    input-id: int,
+}
+
+export component RouteStrip inherits Rectangle {
+    in property <int> input-id;
+    in property <int> output-id;
+    in property <string> name;
+    in property <color> channel-color;
+    in property <int> volume;
+    in property <bool> muted;
+    in property <int> picking-stream-id;
+
+    callback volume-changed(int, int, int);
+    callback mute-toggled(int, int, bool);
+    callback stream-dropped(int, int); // pw_node_id, target input_id — drop
+
+    width: 100px;
+    border-radius: 6px;
+    border-width: root.picking-stream-id != 0 ? 1px : 0px;
+    border-color: root.picking-stream-id != 0 ? #f39c1260 : transparent;
+
+    // Drop zone: clicking the strip while a stream is picked drops it here
+    drop-area := TouchArea {
+        clicked => {
+            if root.picking-stream-id != 0 {
+                root.stream-dropped(root.picking-stream-id, root.input-id);
+            }
+        }
+        mouse-cursor: root.picking-stream-id != 0 ? pointer : default;
+    }
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 4px;
+
+        // Color bar
+        Rectangle {
+            height: 6px;
+            border-radius: 3px;
+            background: root.channel-color;
+        }
+
+        // Vertical slider — fixed height
+        Slider {
+            height: 200px;
+            orientation: vertical;
+            minimum: 0;
+            maximum: 100;
+            value: root.volume;
+            changed(val) => {
+                root.volume-changed(root.input-id, root.output-id, Math.round(val));
+            }
+        }
+
+        // Volume percentage
+        Text {
+            text: root.volume + "%";
+            horizontal-alignment: center;
+            font-size: 11px;
+        }
+
+        // Mute button
+        Rectangle {
+            height: 28px;
+            border-radius: 4px;
+            background: root.muted ? #e74c3c : #3498db;
+
+            TouchArea {
+                clicked => {
+                    root.mute-toggled(root.input-id, root.output-id, !root.muted);
+                }
+            }
+
+            Text {
+                text: root.muted ? "Unmute" : "Mute";
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 11px;
+            }
+        }
+
+        // Channel name
+        Text {
+            text: root.name;
+            horizontal-alignment: center;
+            font-weight: 700;
+            font-size: 12px;
+        }
+    }
+}

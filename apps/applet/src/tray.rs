@@ -1,9 +1,12 @@
 use std::sync::Mutex;
 
-use crate::AppletMsg;
+pub(crate) enum TrayMsg {
+    TogglePopup,
+    Quit,
+}
 
 pub(crate) struct MixCtlTray {
-    pub msg_tx: Mutex<std::sync::mpsc::Sender<AppletMsg>>,
+    pub msg_tx: Mutex<tokio::sync::mpsc::UnboundedSender<TrayMsg>>,
 }
 
 impl ksni::Tray for MixCtlTray {
@@ -22,7 +25,7 @@ impl ksni::Tray for MixCtlTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        self.msg_tx.lock().unwrap().send(AppletMsg::TogglePopup).ok();
+        self.msg_tx.lock().unwrap().send(TrayMsg::TogglePopup).ok();
     }
 
     fn menu(&self) -> Vec<ksni::menu::MenuItem<Self>> {
@@ -39,7 +42,7 @@ impl ksni::Tray for MixCtlTray {
             ksni::menu::StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(|tray: &mut Self| {
-                    tray.msg_tx.lock().unwrap().send(AppletMsg::Quit).ok();
+                    tray.msg_tx.lock().unwrap().send(TrayMsg::Quit).ok();
                 }),
                 ..Default::default()
             }

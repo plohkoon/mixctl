@@ -1,0 +1,31 @@
+export component StreamCard inherits Rectangle {
+    in property <int> pw-node-id;
+    in property <string> app-name;
+    in property <color> input-color;
+    in property <bool> picked;
+
+    callback clicked();
+
+    height: 22px;
+    clip: true;
+    border-radius: 4px;
+    background: root.picked ? #f39c1240 : #2c3e5040;
+    border-width: root.picked ? 1px : 0px;
+    border-color: #f39c12;
+
+    TouchArea {
+        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+    }
+
+    Text {
+        x: 6px;
+        y: 0;
+        width: root.width - 12px;
+        height: root.height;
+        text: root.app-name;
+        font-size: 10px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+}

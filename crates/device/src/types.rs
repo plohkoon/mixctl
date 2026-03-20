@@ -1,9 +1,11 @@
-use mixctl_beacn_display::DisplayState;
+use mixctl_beacn_display::{DisplayLayout, DisplayState};
 
 /// Commands sent from the daemon to the device thread.
 pub enum DeviceCommand {
     /// Update the display with new mixer state.
     UpdateState(DisplayState),
+    /// Switch to a different display layout at runtime.
+    ChangeLayout(Box<dyn DisplayLayout>),
     /// Shut down the device thread.
     Shutdown,
 }

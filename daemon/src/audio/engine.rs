@@ -162,6 +162,8 @@ fn run_pw_loop(
 
     let state = Rc::new(RefCell::new(PwState {
         input_sinks: HashMap::new(),
+        input_sink_pw_ids: HashMap::new(),
+        output_target_devices: HashMap::new(),
         output_sources: HashMap::new(),
         route_loopbacks: HashMap::new(),
         output_target_loopbacks: HashMap::new(),
@@ -282,7 +284,11 @@ fn run_pw_loop(
 /// Internal state for the PipeWire thread. All PW objects live here (not Send/Sync).
 struct PwState {
     input_sinks: HashMap<u32, PwNodeState>,
+    /// Map input_id → PipeWire node ID for stream routing via metadata
+    input_sink_pw_ids: HashMap<u32, u32>,
     output_sources: HashMap<u32, PwNodeState>,
+    /// Map output_id → target device name for pinning output-target loopback nodes
+    output_target_devices: HashMap<u32, String>,
     route_loopbacks: HashMap<(u32, u32), PwLoopbackState>,
     output_target_loopbacks: HashMap<u32, PwLoopbackState>,
     capture_loopbacks: HashMap<u32, PwCaptureState>,
@@ -449,9 +455,40 @@ fn handle_node_global(
                             s.route_playback_nodes.insert((iid, oid), node);
                             s.route_playback_node_ids.insert(global.id, (iid, oid));
                             debug!("tracked route playback node: {node_name} (pw_id={})", global.id);
+                            // Pin this playback node to its output source via metadata
+                            let target = format!("mixctl.output.{oid}");
+                            if let Some(metadata) = &s.metadata {
+                                metadata.set_property(
+                                    global.id,
+                                    "target.object",
+                                    Some("Spa:String:JSON"),
+                                    Some(&target),
+                                );
+                            }
                         }
                         Err(e) => {
                             warn!("failed to bind route playback node {node_name}: {e}");
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Pin output-target playback nodes to their hardware device via metadata
+            if let Some(suffix) = effective_name.strip_prefix("mixctl.output-target.") {
+                if let Ok(oid) = suffix.parse::<u32>() {
+                    let s = state.borrow();
+                    if let Some(metadata) = &s.metadata {
+                        // Look up the configured target device for this output
+                        // We stored it when we created the loopback — retrieve from config
+                        if let Some(lb) = s.output_target_devices.get(&oid) {
+                            metadata.set_property(
+                                global.id,
+                                "target.object",
+                                Some("Spa:String:JSON"),
+                                Some(lb),
+                            );
+                            debug!("pinned output-target playback {node_name} → {lb}");
                         }
                     }
                 }
@@ -477,6 +514,51 @@ fn handle_node_global(
                     media_name,
                 })
                 .ok();
+        }
+        "Stream/Input/Audio" => {
+            let node_name = props.get("node.name").unwrap_or("");
+            let effective_name = node_name.strip_prefix("input.").unwrap_or(node_name);
+
+            // Pin route capture nodes to their input sink
+            if let Some(route_suffix) = effective_name.strip_prefix("mixctl.route.") {
+                if let Some((iid, _oid)) = parse_route_ids(route_suffix) {
+                    let s = state.borrow();
+                    if let Some(metadata) = &s.metadata {
+                        let target = format!("mixctl.input.{iid}");
+                        metadata.set_property(
+                            global.id,
+                            "target.object",
+                            Some("Spa:String:JSON"),
+                            Some(&target),
+                        );
+                        debug!("pinned route capture {node_name} → {target}");
+                    }
+                }
+                return;
+            }
+
+            // Pin output-target capture nodes to their output source
+            if let Some(suffix) = effective_name.strip_prefix("mixctl.output-target.") {
+                if let Ok(oid) = suffix.parse::<u32>() {
+                    let s = state.borrow();
+                    if let Some(metadata) = &s.metadata {
+                        let target = format!("mixctl.output.{oid}");
+                        metadata.set_property(
+                            global.id,
+                            "target.object",
+                            Some("Spa:String:JSON"),
+                            Some(&target),
+                        );
+                        debug!("pinned output-target capture {node_name} → {target}");
+                    }
+                }
+                return;
+            }
+
+            // Ignore other mixctl capture nodes
+            if effective_name.starts_with("mixctl.") {
+                return;
+            }
         }
         "Audio/Source" => {
             let node_name = props.get("node.name").unwrap_or("");
@@ -566,6 +648,7 @@ fn handle_command(
             s.level_listeners.remove(&input_id);
             s.level_peaks.remove(&input_id);
             // Destroy input sink
+            s.input_sink_pw_ids.remove(&input_id);
             if s.input_sinks.remove(&input_id).is_some() {
                 event_sender
                     .send(PwEvent::InputSinkDestroyed { input_id })
@@ -681,6 +764,7 @@ fn handle_command(
         } => {
             {
                 let mut s = state.borrow_mut();
+                s.output_target_devices.remove(&output_id);
                 if let Some(lb) = s.output_target_loopbacks.remove(&output_id) {
                     destroy_module(lb._module_ptr);
                 }
@@ -697,15 +781,24 @@ fn handle_command(
         } => {
             let s = state.borrow();
             if let Some(metadata) = &s.metadata {
-                let target = format!("mixctl.input.{input_id}");
-                let value = format!("{{\"name\": \"{target}\"}}");
+                let target_name = format!("mixctl.input.{input_id}");
+                // Set target.object to the node name — WirePlumber checks this
+                // first and matches by node.name when the value is non-numeric.
+                metadata.set_property(
+                    pw_node_id,
+                    "target.object",
+                    Some("Spa:String:JSON"),
+                    Some(&target_name),
+                );
+                // Also set target.node by name as a fallback
+                let value = format!("{{\"name\": \"{target_name}\"}}");
                 metadata.set_property(
                     pw_node_id,
                     "target.node",
                     Some("Spa:String:JSON"),
                     Some(&value),
                 );
-                debug!("moved stream {pw_node_id} to input {input_id}");
+                debug!("moved stream {pw_node_id} to input {input_id} ({target_name})");
             } else {
                 warn!("cannot move stream: metadata not available");
             }
@@ -863,6 +956,7 @@ fn create_input_sink(
         Ok(proxy) => {
             let ev = event_sender.clone();
             let fired = Rc::new(Cell::new(false));
+            let info_state = state.clone();
             let listener = proxy
                 .add_listener_local()
                 .info({
@@ -872,6 +966,7 @@ fn create_input_sink(
                             return;
                         }
                         fired.set(true);
+                        info_state.borrow_mut().input_sink_pw_ids.insert(input_id, info.id());
                         ev.send(PwEvent::InputSinkCreated {
                             input_id,
                             pw_node_id: info.id(),
@@ -914,14 +1009,13 @@ fn create_output_source(
     description: &str,
 ) {
     let node_name = format!("mixctl.output.{output_id}");
-    // null-audio-sink with Audio/Source/Virtual creates a source node. The Virtual
-    // suffix ensures it passes through the registry's Audio/Source detection for
-    // capture devices, while the mixctl. name prefix filters it out.
+    // Audio/Sink so route loopback playback nodes can connect to its playback ports,
+    // and the output-target loopback can capture from its monitor ports.
     let props = properties! {
         "factory.name" => "support.null-audio-sink",
         "node.name" => node_name.clone(),
         "node.description" => description.to_string(),
-        "media.class" => "Audio/Source/Virtual",
+        "media.class" => "Audio/Sink",
         "audio.position" => "FL,FR,FC,LFE,RL,RR,SL,SR",
         "monitor.channel-volumes" => "true",
         "node.autoconnect" => "false",
@@ -1009,15 +1103,17 @@ fn create_route_loopback(
 
     let args = format!(
         "{{ \
-            node.name = {node_name} \
+            node.name = \"{node_name}\" \
             node.description = \"Route {input_id} to {output_id}\" \
             capture.props = {{ \
-                target.object = {input_target} \
+                target.object = \"{input_target}\" \
                 stream.capture.sink = true \
+                node.autoconnect = false \
                 audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
             }} \
             playback.props = {{ \
-                target.object = {output_target} \
+                target.object = \"{output_target}\" \
+                node.autoconnect = false \
                 audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
                 channelmix.normalize = false \
                 channelmix.volume = {pw_volume} \
@@ -1083,15 +1179,17 @@ fn create_output_target_loopback(
 
     let args = format!(
         "{{ \
-            node.name = {node_name} \
+            node.name = \"{node_name}\" \
             node.description = \"Output {output_id} to Device\" \
             capture.props = {{ \
-                target.object = {source_name} \
+                target.object = \"{source_name}\" \
                 stream.capture.sink = true \
+                node.autoconnect = false \
                 audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
             }} \
             playback.props = {{ \
-                target.object = {device_name} \
+                target.object = \"{device_name}\" \
+                node.autoconnect = false \
                 audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
             }} \
         }}"
@@ -1104,7 +1202,9 @@ fn create_output_target_loopback(
         return;
     }
 
-    state.borrow_mut().output_target_loopbacks.insert(
+    let mut s = state.borrow_mut();
+    s.output_target_devices.insert(output_id, device_name.to_string());
+    s.output_target_loopbacks.insert(
         output_id,
         PwLoopbackState {
             _module_ptr: module_ptr,
@@ -1125,14 +1225,16 @@ fn create_capture_loopback(
 
     let args = format!(
         "{{ \
-            node.name = {node_name} \
+            node.name = \"{node_name}\" \
             node.description = \"Capture to Input {input_id}\" \
             capture.props = {{ \
-                target.object = {capture_device_name} \
+                target.object = \"{capture_device_name}\" \
+                node.autoconnect = false \
                 audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
             }} \
             playback.props = {{ \
-                target.object = {input_sink_name} \
+                target.object = \"{input_sink_name}\" \
+                node.autoconnect = false \
                 audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
                 channelmix.normalize = false \
                 channelmix.volume = {pw_volume} \

@@ -1,0 +1,86 @@
+import { Button, ComboBox, SpinBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export component BeacnDialog inherits Window {
+    title: "Beacn Settings";
+    width: 340px;
+    height: 260px;
+
+    in-out property <string> layout;
+    in-out property <int> dial-sensitivity;
+    in-out property <int> level-decay-pct;  // 0-100 representing 0.0-1.0
+
+    callback apply();
+    callback close-requested();
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        // Layout
+        HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "Layout:";
+                vertical-alignment: center;
+                width: 120px;
+            }
+            layout-combo := ComboBox {
+                model: ["column", "grid", "dial"];
+                current-value: root.layout;
+                selected(val) => {
+                    root.layout = val;
+                }
+            }
+        }
+
+        // Dial sensitivity
+        HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "Dial Sensitivity:";
+                vertical-alignment: center;
+                width: 120px;
+            }
+            SpinBox {
+                minimum: 1;
+                maximum: 10;
+                value: root.dial-sensitivity;
+                edited(val) => {
+                    root.dial-sensitivity = val;
+                }
+            }
+        }
+
+        // Level decay
+        HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "Level Decay:";
+                vertical-alignment: center;
+                width: 120px;
+            }
+            SpinBox {
+                minimum: 0;
+                maximum: 100;
+                value: root.level-decay-pct;
+                edited(val) => {
+                    root.level-decay-pct = val;
+                }
+            }
+        }
+
+        // Spacer
+        Rectangle { vertical-stretch: 1; }
+
+        // Apply button
+        HorizontalBox {
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Apply";
+                clicked => {
+                    root.apply();
+                }
+            }
+        }
+    }
+}

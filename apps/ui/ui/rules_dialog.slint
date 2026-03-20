@@ -1,0 +1,95 @@
+import { Button, LineEdit, ComboBox, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+export struct AppRuleData {
+    app-name: string,
+    input-id: int,
+    input-name: string,
+}
+
+export component RulesDialog inherits Window {
+    title: "App Rules";
+    width: 420px;
+    height: 380px;
+
+    in property <[AppRuleData]> rules;
+    in property <[string]> input-names;
+
+    callback add-rule(string, int);      // app_name, input_index
+    callback remove-rule(string);        // app_name
+    callback close-requested();
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+
+        // Rules list
+        ScrollView {
+            vertical-stretch: 1;
+
+            VerticalBox {
+                spacing: 2px;
+
+                if root.rules.length == 0: Text {
+                    text: "No rules configured";
+                    horizontal-alignment: center;
+                    color: #888;
+                }
+
+                for rule[idx] in root.rules: Rectangle {
+                    height: 40px;
+                    border-radius: 4px;
+                    background: Math.mod(idx, 2) == 0 ? #ffffff08 : transparent;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 8px;
+
+                        Text {
+                            text: rule.app-name;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "▸ " + rule.input-name;
+                            color: #888;
+                            vertical-alignment: center;
+                        }
+
+                        Button {
+                            text: "✕";
+                            clicked => {
+                                root.remove-rule(rule.app-name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add rule row
+        HorizontalBox {
+            spacing: 8px;
+
+            line-edit := LineEdit {
+                horizontal-stretch: 1;
+                placeholder-text: "App name";
+            }
+
+            input-combo := ComboBox {
+                model: root.input-names;
+            }
+
+            Button {
+                text: "Add";
+                clicked => {
+                    if line-edit.text != "" {
+                        root.add-rule(line-edit.text, input-combo.current-index);
+                        line-edit.text = "";
+                    }
+                }
+            }
+        }
+    }
+}

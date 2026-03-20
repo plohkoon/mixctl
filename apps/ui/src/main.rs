@@ -1,187 +1,116 @@
-mod capture;
 mod dbus;
-mod rules;
-mod settings;
-mod sidebar;
-mod streams;
-mod strips;
 
-use std::cell::Cell;
-use std::collections::HashMap;
-use std::cell::RefCell;
-use std::rc::Rc;
+slint::include_modules!();
 
-use gtk4::glib;
-use gtk4::glib::clone;
-use gtk4::prelude::*;
-use libadwaita as adw;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
-use mixctl_core::config_sections::UiConfig;
-use strips::WidgetMap;
-
-fn fetch_ui_config() -> UiConfig {
-    match zbus::blocking::Connection::session() {
-        Ok(conn) => {
-            match conn.call_method(
-                Some("dev.greghuber.MixCtl"),
-                "/dev/greghuber/MixCtl1",
-                Some("dev.greghuber.MixCtl1"),
-                "GetConfigSection",
-                &("ui",),
-            ) {
-                Ok(reply) => {
-                    let json: String = reply.body().deserialize().unwrap_or_default();
-                    serde_json::from_str(&json).unwrap_or_default()
-                }
-                Err(_) => UiConfig::default(),
-            }
-        }
-        Err(_) => UiConfig::default(),
-    }
+/// Actions from UI -> tokio background thread
+#[allow(dead_code)]
+pub(crate) enum UserAction {
+    SetRouteVolume { input_id: u32, output_id: u32, volume: u8 },
+    SetRouteMute { input_id: u32, output_id: u32, muted: bool },
+    SetOutputVolume { id: u32, volume: u8 },
+    SetOutputMute { id: u32, muted: bool },
+    SelectOutput { output_id: u32 },
+    SetOutputTarget { id: u32, device_index: usize },
+    SetDefaultInput { index: usize },
+    AssignStream { pw_node_id: u32, input_id: u32, remember: bool },
+    AddRule { app_name: String, input_index: usize },
+    RemoveRule { app_name: String },
+    AddCapture { pw_node_id: u32, name: String, color: String },
+    ApplyBeacn { layout: String, dial_sensitivity: u32, level_decay: f64 },
+    OpenRulesDialog,
+    OpenCaptureDialog,
+    OpenBeacnDialog,
 }
 
-fn main() -> glib::ExitCode {
-    let config = fetch_ui_config();
-    let app = adw::Application::builder()
-        .application_id("dev.greghuber.MixCtlUi")
-        .build();
-    app.connect_activate(move |app| build_ui(app, &config));
-    app.run()
+fn main() {
+    let window = MainWindow::new().unwrap();
+    let window_weak = window.as_weak();
+
+    let (action_tx, action_rx) = mpsc::unbounded_channel::<UserAction>();
+    let action_tx = Arc::new(action_tx);
+
+    // Wire UI callbacks -> action channel
+    wire_callbacks(&window, &action_tx);
+
+    // Spawn tokio runtime on background thread
+    let bg_window = window_weak.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            dbus::run_background(bg_window, action_rx).await;
+        });
+    });
+
+    window.run().unwrap();
 }
 
-fn build_ui(app: &adw::Application, config: &UiConfig) {
-    // -- Status indicator --
-    let status_label = gtk4::Label::new(Some("○"));
-    status_label.add_css_class("error");
+fn wire_callbacks(window: &MainWindow, action_tx: &Arc<mpsc::UnboundedSender<UserAction>>) {
+    let mixer = window.global::<MixerState>();
 
-    // -- Header bar --
-    let title_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    title_box.set_halign(gtk4::Align::Center);
-    let title = adw::WindowTitle::new("MixCtl", "");
-    title_box.append(&title);
-    title_box.append(&status_label);
+    let tx = action_tx.clone();
+    mixer.on_set_route_volume(move |input_id, output_id, volume| {
+        tx.send(UserAction::SetRouteVolume {
+            input_id: input_id as u32,
+            output_id: output_id as u32,
+            volume: volume as u8,
+        }).ok();
+    });
 
-    let rules_button = gtk4::Button::with_label("Rules");
-    let devices_button = gtk4::Button::with_label("Devices");
-    let settings_button = gtk4::Button::with_label("Settings");
+    let tx = action_tx.clone();
+    mixer.on_set_route_mute(move |input_id, output_id, muted| {
+        tx.send(UserAction::SetRouteMute {
+            input_id: input_id as u32,
+            output_id: output_id as u32,
+            muted,
+        }).ok();
+    });
 
-    let header = adw::HeaderBar::builder()
-        .title_widget(&title_box)
-        .build();
-    header.pack_end(&settings_button);
-    header.pack_end(&devices_button);
-    header.pack_end(&rules_button);
+    let tx = action_tx.clone();
+    mixer.on_select_output(move |id| {
+        tx.send(UserAction::SelectOutput {
+            output_id: id as u32,
+        }).ok();
+    });
 
-    // -- Sidebar: output list --
-    let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-    sidebar_box.set_margin_start(config.margin);
-    sidebar_box.set_margin_end(config.margin);
-    sidebar_box.set_margin_top(config.margin);
-    sidebar_box.set_margin_bottom(config.margin);
-    sidebar_box.set_width_request(180);
+    let tx = action_tx.clone();
+    mixer.on_set_output_target(move |id, device_index| {
+        tx.send(UserAction::SetOutputTarget {
+            id: id as u32,
+            device_index: device_index as usize,
+        }).ok();
+    });
 
-    let sidebar_scrolled = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vscrollbar_policy(gtk4::PolicyType::Automatic)
-        .vexpand(true)
-        .hexpand(false)
-        .child(&sidebar_box)
-        .build();
+    let tx = action_tx.clone();
+    mixer.on_set_default_input(move |index| {
+        tx.send(UserAction::SetDefaultInput {
+            index: index as usize,
+        }).ok();
+    });
 
-    // -- Main area: input route sliders --
-    let strips_box = gtk4::Box::new(gtk4::Orientation::Horizontal, config.margin);
-    strips_box.set_margin_start(config.margin);
-    strips_box.set_margin_end(config.margin);
-    strips_box.set_margin_top(config.margin);
-    strips_box.set_margin_bottom(config.margin);
-    strips_box.set_halign(gtk4::Align::Start);
+    let tx = action_tx.clone();
+    mixer.on_assign_stream(move |pw_node_id, input_id, remember| {
+        tx.send(UserAction::AssignStream {
+            pw_node_id: pw_node_id as u32,
+            input_id: input_id as u32,
+            remember,
+        }).ok();
+    });
 
-    let main_scrolled = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Automatic)
-        .vscrollbar_policy(gtk4::PolicyType::Never)
-        .hexpand(true)
-        .vexpand(true)
-        .child(&strips_box)
-        .build();
+    let tx = action_tx.clone();
+    mixer.on_open_rules_dialog(move || {
+        tx.send(UserAction::OpenRulesDialog).ok();
+    });
 
-    // -- Streams panel --
-    let streams_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    streams_box.set_margin_start(config.margin);
-    streams_box.set_margin_end(config.margin);
-    streams_box.set_margin_top(config.margin);
-    streams_box.set_margin_bottom(config.margin);
-    streams_box.set_halign(gtk4::Align::Start);
+    let tx = action_tx.clone();
+    mixer.on_open_capture_dialog(move || {
+        tx.send(UserAction::OpenCaptureDialog).ok();
+    });
 
-    let streams_scrolled = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Automatic)
-        .vscrollbar_policy(gtk4::PolicyType::Never)
-        .child(&streams_box)
-        .build();
-
-    // -- Main vertical layout (strips + streams) --
-    let main_vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    main_vbox.set_hexpand(true);
-    main_vbox.append(&main_scrolled);
-    let streams_sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
-    main_vbox.append(&streams_sep);
-    main_vbox.append(&streams_scrolled);
-
-    // -- Layout --
-    let paned = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    let separator = gtk4::Separator::new(gtk4::Orientation::Vertical);
-    paned.append(&sidebar_scrolled);
-    paned.append(&separator);
-    paned.append(&main_vbox);
-
-    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    content.append(&header);
-    content.append(&paned);
-
-    let window = adw::ApplicationWindow::builder()
-        .application(app)
-        .title("MixCtl")
-        .default_width(config.window_width)
-        .default_height(config.window_height)
-        .content(&content)
-        .build();
-
-    let widget_map: WidgetMap = Rc::new(RefCell::new(HashMap::new()));
-    let selected_output_id: Rc<Cell<u32>> = Rc::new(Cell::new(0));
-    let css_provider = gtk4::CssProvider::new();
-    gtk4::style_context_add_provider_for_display(
-        &gtk4::gdk::Display::default().unwrap(),
-        &css_provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
-
-    glib::spawn_future_local(clone!(
-        #[weak] strips_box,
-        #[weak] sidebar_box,
-        #[weak] streams_box,
-        #[weak] status_label,
-        #[weak] rules_button,
-        #[weak] devices_button,
-        #[weak] settings_button,
-        #[weak] window,
-        #[strong] widget_map,
-        #[strong] selected_output_id,
-        #[strong] css_provider,
-        async move {
-            dbus::connect_and_subscribe(
-                strips_box,
-                sidebar_box,
-                streams_box,
-                status_label,
-                rules_button,
-                devices_button,
-                settings_button,
-                window,
-                widget_map,
-                selected_output_id,
-                css_provider,
-            ).await;
-        }
-    ));
-
-    window.present();
+    let tx = action_tx.clone();
+    mixer.on_open_beacn_dialog(move || {
+        tx.send(UserAction::OpenBeacnDialog).ok();
+    });
 }

@@ -43,7 +43,7 @@ fn run_device_thread(
     shutdown_flag: Arc<AtomicBool>,
     event_tx: tokio::sync::mpsc::UnboundedSender<DeviceEvent>,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DeviceCommand>,
-    layout: Box<dyn DisplayLayout>,
+    mut layout: Box<dyn DisplayLayout>,
 ) {
     let mut backoff = Duration::from_secs(2);
 
@@ -82,7 +82,7 @@ fn run_device_thread(
             &shutdown_flag,
             &event_tx,
             &mut cmd_rx,
-            &*layout,
+            &mut layout,
         );
 
         // Shutdown device
@@ -118,7 +118,7 @@ fn run_inner_loop(
     shutdown_flag: &Arc<AtomicBool>,
     event_tx: &tokio::sync::mpsc::UnboundedSender<DeviceEvent>,
     cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<DeviceCommand>,
-    layout: &dyn DisplayLayout,
+    layout: &mut Box<dyn DisplayLayout>,
 ) -> DisconnectReason {
     let mut current_state: Option<DisplayState> = None;
     let mut prev_state: Option<DisplayState> = None;
@@ -146,6 +146,10 @@ fn run_inner_loop(
                     }
                     current_state = Some(new_state);
                 }
+                Ok(DeviceCommand::ChangeLayout(new_layout)) => {
+                    *layout = new_layout;
+                    needs_full_redraw = true;
+                }
                 Ok(DeviceCommand::Shutdown) => {
                     return DisconnectReason::CommandShutdown;
                 }
@@ -156,7 +160,7 @@ fn run_inner_loop(
         // Render updates if state changed
         if let Some(ref state) = current_state {
             if needs_full_redraw {
-                let jpeg = layout.render_full(state);
+                let jpeg = (**layout).render_full(state);
                 if let Err(e) = send_full(dev, &jpeg) {
                     return DisconnectReason::UsbError(e.to_string());
                 }
@@ -167,7 +171,7 @@ fn run_inner_loop(
                 prev_state = Some(state.clone());
             } else if let Some(ref prev) = prev_state {
                 if prev != state {
-                    let patches = layout.render_diff(prev, state);
+                    let patches = (**layout).render_diff(prev, state);
                     for p in &patches {
                         if let Err(e) = send_patch(dev, p) {
                             return DisconnectReason::UsbError(e.to_string());

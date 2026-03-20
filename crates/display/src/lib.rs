@@ -23,8 +23,8 @@ pub enum DeviceLayoutKind {
 impl DeviceLayoutKind {
     pub fn from_str_loose(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "grid" | "2x2" => Self::Grid,
-            "dial" | "dials" => Self::Dial,
+            "grid" | "grid2x2" | "2x2" => Self::Grid,
+            "dial" | "dial4" | "dials" => Self::Dial,
             _ => Self::Column,
         }
     }

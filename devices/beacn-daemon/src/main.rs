@@ -189,17 +189,15 @@ async fn main() -> anyhow::Result<()> {
                         let mut s = s8.lock().await;
                         s.dial_sensitivity = config.dial_sensitivity;
                         s.level_decay = config.level_decay;
-                        info!("beacn config updated: dial_sensitivity={}, level_decay={}",
-                            config.dial_sensitivity, config.level_decay);
-                        if s.dial_sensitivity != config.dial_sensitivity || s.level_decay != config.level_decay {
-                            let snapshot = s.build_snapshot();
-                            t8.send(DeviceCommand::UpdateState(snapshot)).ok();
-                        }
-                        if config.layout != "column" && config.layout != "grid" && config.layout != "dial" {
-                            warn!("layout change to '{}' requires restart", config.layout);
-                        } else {
-                            warn!("layout changes require restarting beacn-daemon");
-                        }
+                        info!("beacn config updated: layout={}, dial_sensitivity={}, level_decay={}",
+                            config.layout, config.dial_sensitivity, config.level_decay);
+                        let snapshot = s.build_snapshot();
+                        t8.send(DeviceCommand::UpdateState(snapshot)).ok();
+                        // Apply layout change at runtime
+                        let new_kind = DeviceLayoutKind::from_str_loose(&config.layout);
+                        let new_layout = new_kind.create_layout();
+                        info!("switching display layout to {new_kind:?}");
+                        t8.send(DeviceCommand::ChangeLayout(new_layout)).ok();
                     }
                 }
                 Err(e) => warn!("failed to re-fetch beacn config: {e}"),
