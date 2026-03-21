@@ -1,6 +1,5 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
 use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +7,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use pipewire as pw;
+use pipewire::core::CoreRc;
+use pipewire::link::Link;
 use pipewire::node::Node;
 use pipewire::properties::properties;
 use pipewire::spa::param::ParamType;
@@ -19,6 +20,7 @@ use tracing::{debug, error, info, warn};
 
 use super::commands::PwCommand;
 use super::events::PwEvent;
+use super::mixer::{MixerFilter, VolumeMatrix, CHANNELS, NUM_CHANNELS};
 
 /// SPA_PROP_channelVolumes (0x20005 from spa/param/props.h)
 const SPA_PROP_CHANNEL_VOLUMES: u32 = 0x20005;
@@ -71,14 +73,6 @@ pub struct PwCaptureInputConfig {
 }
 
 impl PwEngine {
-    /// Spawn a PipeWire engine on a dedicated OS thread with automatic reconnection.
-    ///
-    /// On each connection (or reconnection), the PW thread creates a new
-    /// `pipewire::channel::channel()` and sends `PwEvent::ChannelReady` with the sender.
-    /// The tokio relay task swaps in the new sender to resume forwarding commands.
-    ///
-    /// The `shutdown_flag` is shared with the tokio side; set it before dropping the
-    /// event channel to stop the retry loop.
     pub fn spawn(
         config: PwEngineConfig,
         shutdown_flag: Arc<AtomicBool>,
@@ -86,30 +80,20 @@ impl PwEngine {
     ) -> Self {
         let thread_handle = thread::spawn(move || {
             pw::init();
-
             let mut backoff = Duration::from_secs(1);
-
             loop {
-                // Create a fresh channel for each connection attempt
                 let (new_tx, new_rx) = pipewire::channel::channel();
-                event_sender
-                    .send(PwEvent::ChannelReady { sender: new_tx })
-                    .ok();
-
+                event_sender.send(PwEvent::ChannelReady { sender: new_tx }).ok();
                 run_pw_loop(&config, new_rx, &event_sender);
-
                 if shutdown_flag.load(Ordering::Acquire) {
                     break;
                 }
-
                 warn!("PipeWire disconnected, reconnecting in {:?}", backoff);
                 thread::sleep(backoff);
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
-
             info!("PipeWire thread exiting");
         });
-
         PwEngine { thread_handle }
     }
 
@@ -119,6 +103,26 @@ impl PwEngine {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// PendingLink — declarative link spec resolved via registry
+// ---------------------------------------------------------------------------
+
+/// A link we want to create, identified by node name + port name on each side.
+/// Resolved to numeric port IDs when both ports appear in the registry.
+#[derive(Clone, Debug)]
+struct PendingLink {
+    /// Group key for bulk operations (e.g. "input_to_filter:1")
+    group: String,
+    out_node_name: String,
+    out_port_name: String,
+    in_node_name: String,
+    in_port_name: String,
+}
+
+// ---------------------------------------------------------------------------
+// run_pw_loop
+// ---------------------------------------------------------------------------
 
 fn run_pw_loop(
     config: &PwEngineConfig,
@@ -160,16 +164,37 @@ fn run_pw_loop(
 
     let registry = core.get_registry_rc().expect("failed to get registry");
 
+    let volume_matrix = Arc::new(VolumeMatrix::new());
+
+    let mixer = MixerFilter::new(&core, Arc::clone(&volume_matrix));
+    if mixer.is_none() {
+        error!("failed to create mixer filter, aborting PW loop");
+        event_sender.send(PwEvent::Error {
+            message: "failed to create mixer filter".into(),
+        }).ok();
+        return;
+    }
+
     let state = Rc::new(RefCell::new(PwState {
+        core: Some(core.clone()),
         input_sinks: HashMap::new(),
         input_sink_pw_ids: HashMap::new(),
-        output_target_devices: HashMap::new(),
         output_sources: HashMap::new(),
-        route_loopbacks: HashMap::new(),
-        output_target_loopbacks: HashMap::new(),
-        capture_loopbacks: HashMap::new(),
-        route_playback_nodes: HashMap::new(),
-        route_playback_node_ids: HashMap::new(),
+        mixer: mixer,
+        volume_matrix,
+        input_id_to_idx: HashMap::new(),
+        output_id_to_idx: HashMap::new(),
+        // Port tracking for registry-driven linking
+        node_name_to_id: HashMap::new(),
+        port_index: HashMap::new(),
+        port_id_to_key: HashMap::new(),
+        pending_links: Vec::new(),
+        active_links: HashMap::new(),
+        // Stream routing
+        pending_stream_routes: HashMap::new(),
+        stream_port_cache: HashMap::new(),
+        // Capture device names for volume changes
+        capture_device_names: HashMap::new(),
         metadata: None,
         _metadata_listener: None,
         deferred_default_input: config.default_input_id,
@@ -183,7 +208,7 @@ fn run_pw_loop(
         level_last_sent: Instant::now(),
     }));
 
-    // Listen for registry events
+    // Registry listener
     let reg_state = state.clone();
     let reg_event_sender = event_sender.clone();
     let reg_registry = registry.clone();
@@ -197,10 +222,18 @@ fn run_pw_loop(
             let remove_state = state.clone();
             move |id| {
                 let mut s = remove_state.borrow_mut();
-                // Clean up route playback node tracking
-                if let Some(key) = s.route_playback_node_ids.remove(&id) {
-                    s.route_playback_nodes.remove(&key);
-                } else if s.known_stream_ids.remove(&id) {
+                // Clean up port tracking
+                if let Some(key) = s.port_id_to_key.remove(&id) {
+                    s.port_index.remove(&key);
+                }
+                // Clean up node tracking
+                s.node_name_to_id.retain(|_, v| *v != id);
+                // Clean up stream/device tracking
+                if s.known_stream_ids.remove(&id) {
+                    s.active_links.retain(|k, _| !k.starts_with(&format!("stream:{id}:")));
+                    s.pending_links.retain(|pl| !pl.group.starts_with(&format!("stream:{id}")));
+                    s.pending_stream_routes.remove(&id);
+                    s.stream_port_cache.remove(&id);
                     ev.send(PwEvent::StreamRemoved { pw_node_id: id }).ok();
                 } else if s.known_capture_ids.remove(&id) {
                     ev.send(PwEvent::CaptureDeviceRemoved { pw_node_id: id }).ok();
@@ -211,68 +244,83 @@ fn run_pw_loop(
         })
         .register();
 
-    // Listen for core errors
+    // Core error listener
     let error_event_sender = event_sender.clone();
     let _core_listener = core
         .add_listener_local()
         .error(move |_id, _seq, _res, msg| {
-            error!("PipeWire core error: {msg}");
-            error_event_sender.send(PwEvent::Error {
-                message: msg.to_string(),
-            }).ok();
+            if msg.contains("File exists") {
+                debug!("PipeWire link already exists: {msg}");
+            } else {
+                error!("PipeWire core error: {msg}");
+                error_event_sender.send(PwEvent::Error {
+                    message: msg.to_string(),
+                }).ok();
+            }
         })
         .register();
 
-    // Attach command receiver to the main loop
+    // Command receiver
     let cmd_state = state.clone();
     let cmd_event_sender = event_sender.clone();
     let cmd_main_loop = main_loop.clone();
-    let cmd_context = context.clone();
     let cmd_core = core.clone();
-    // Keep-alive: dropping unregisters the command handler from the main loop
     let _cmd_receiver = cmd_receiver.attach(main_loop.loop_(), move |cmd| {
-        handle_command(
-            &cmd_state,
-            &cmd_event_sender,
-            &cmd_main_loop,
-            &cmd_context,
-            &cmd_core,
-            cmd,
-        );
+        handle_command(&cmd_state, &cmd_event_sender, &cmd_main_loop, &cmd_core, cmd);
     });
 
-    // Signal successful connection
     event_sender.send(PwEvent::Connected).ok();
     info!("PipeWire connected");
 
-    // Create initial input sinks
+    // Create initial sinks/sources (ports will be tracked via registry)
     for cfg in &config.inputs {
         create_input_sink(&state, &event_sender, &core, cfg.input_id, &cfg.description);
     }
-
-    // Create initial output sources
     for cfg in &config.outputs {
         create_output_source(&state, &event_sender, &core, cfg.output_id, &cfg.description);
     }
 
-    // Create initial route loopbacks (targeting output sources directly)
-    for cfg in &config.routes {
-        create_route_loopback(&state, &event_sender, &context, cfg.input_id, cfg.output_id, cfg.pw_volume);
+    // Connect the mixer filter
+    {
+        let s = state.borrow();
+        if let Some(ref mixer) = s.mixer {
+            mixer.connect();
+        }
     }
 
-    // Restore output target loopbacks from config
+    // Queue pending links — they'll resolve when ports appear in the registry
+    queue_input_to_filter_links(&state, &config.inputs.iter().map(|c| c.input_id).collect::<Vec<_>>());
+    queue_filter_to_output_links(&state, &config.outputs.iter().map(|c| c.output_id).collect::<Vec<_>>());
     for cfg in &config.output_targets {
-        let source_name = format!("mixctl.output.{}", cfg.output_id);
-        create_output_target_loopback(&state, &context, cfg.output_id, &source_name, &cfg.device_name);
+        queue_output_target_links(&state, cfg.output_id, &cfg.device_name);
     }
-
-    // Restore capture input loopbacks from config
     for cfg in &config.capture_inputs {
-        let input_sink_name = format!("mixctl.input.{}", cfg.input_id);
-        create_capture_loopback(&state, &context, cfg.input_id, &cfg.capture_device_name, &input_sink_name, 1.0);
+        queue_capture_links(&state, cfg.input_id, &cfg.capture_device_name);
     }
 
-    // Run the main loop — blocks until quit() is called
+    // Set initial volume matrix
+    {
+        let s = state.borrow();
+        info!("index maps: inputs={:?} outputs={:?}", s.input_id_to_idx, s.output_id_to_idx);
+    }
+    for cfg in &config.routes {
+        let s = state.borrow();
+        if let (Some(&iidx), Some(&oidx)) = (
+            s.input_id_to_idx.get(&cfg.input_id),
+            s.output_id_to_idx.get(&cfg.output_id),
+        ) {
+            s.volume_matrix.set(iidx, oidx, cfg.pw_volume);
+            info!("volume matrix[{iidx},{oidx}] = {} (input {} → output {})", cfg.pw_volume, cfg.input_id, cfg.output_id);
+        } else {
+            warn!("cannot set volume: input {} or output {} not in index map", cfg.input_id, cfg.output_id);
+        }
+        drop(s);
+        event_sender.send(PwEvent::RouteLinkCreated {
+            input_id: cfg.input_id,
+            output_id: cfg.output_id,
+        }).ok();
+    }
+
     main_loop.run();
 
     if !state.borrow().shutdown {
@@ -281,22 +329,36 @@ fn run_pw_loop(
     info!("PipeWire main loop exited");
 }
 
-/// Internal state for the PipeWire thread. All PW objects live here (not Send/Sync).
+// ---------------------------------------------------------------------------
+// PwState
+// ---------------------------------------------------------------------------
+
 struct PwState {
+    core: Option<CoreRc>,
     input_sinks: HashMap<u32, PwNodeState>,
-    /// Map input_id → PipeWire node ID for stream routing via metadata
     input_sink_pw_ids: HashMap<u32, u32>,
     output_sources: HashMap<u32, PwNodeState>,
-    /// Map output_id → target device name for pinning output-target loopback nodes
-    output_target_devices: HashMap<u32, String>,
-    route_loopbacks: HashMap<(u32, u32), PwLoopbackState>,
-    output_target_loopbacks: HashMap<u32, PwLoopbackState>,
-    capture_loopbacks: HashMap<u32, PwCaptureState>,
-    /// Playback-side Node proxies for route loopbacks, used for in-place volume updates.
-    /// Populated when the loopback's playback node appears in the registry.
-    route_playback_nodes: HashMap<(u32, u32), Node>,
-    /// Reverse map: pw_node_id → (input_id, output_id) for cleanup on global_remove.
-    route_playback_node_ids: HashMap<u32, (u32, u32)>,
+    mixer: Option<MixerFilter>,
+    volume_matrix: Arc<VolumeMatrix>,
+    input_id_to_idx: HashMap<u32, usize>,
+    output_id_to_idx: HashMap<u32, usize>,
+
+    /// Node name → PW node ID (for all nodes we care about)
+    node_name_to_id: HashMap<String, u32>,
+    /// (node_id, port_name) → port global ID
+    port_index: HashMap<(u32, String), u32>,
+    /// Reverse: port global ID → (node_id, port_name) for cleanup
+    port_id_to_key: HashMap<u32, (u32, String)>,
+    /// Links waiting for both ports to appear in the registry
+    pending_links: Vec<PendingLink>,
+    /// Created links, grouped by key prefix (e.g. "input_to_filter:1")
+    active_links: HashMap<String, Vec<Link>>,
+
+    pending_stream_routes: HashMap<u32, u32>,
+    stream_port_cache: HashMap<u32, Vec<(u32, String)>>,
+    /// Capture device names for volume changes (input_id → device_name)
+    capture_device_names: HashMap<u32, String>,
+
     metadata: Option<pw::metadata::Metadata>,
     _metadata_listener: Option<Box<dyn std::any::Any>>,
     deferred_default_input: Option<u32>,
@@ -304,13 +366,9 @@ struct PwState {
     known_capture_ids: HashSet<u32>,
     known_playback_ids: HashSet<u32>,
     shutdown: bool,
-    /// Level monitoring state
     level_monitoring: bool,
-    /// Param listeners for level monitoring, keyed by input_id
     level_listeners: HashMap<u32, Box<dyn std::any::Any>>,
-    /// Cached peak levels per input_id
     level_peaks: HashMap<u32, f32>,
-    /// Last time levels were sent to tokio
     level_last_sent: Instant,
 }
 
@@ -319,20 +377,171 @@ struct PwNodeState {
     _listener: Box<dyn std::any::Any>,
 }
 
-struct PwLoopbackState {
-    _module_ptr: *mut pw::sys::pw_impl_module,
+// ---------------------------------------------------------------------------
+// Link resolution
+// ---------------------------------------------------------------------------
+
+/// Try to resolve and create any pending links whose ports are now known.
+fn try_resolve_pending_links(state: &Rc<RefCell<PwState>>) {
+    let (pending, core) = {
+        let s = state.borrow();
+        let core = match &s.core {
+            Some(c) => c.clone(),
+            None => return,
+        };
+        (s.pending_links.clone(), core)
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    let mut still_pending = Vec::new();
+    let mut new_links: Vec<(String, Link)> = Vec::new();
+
+    for pl in pending {
+        let resolved = {
+            let s = state.borrow();
+            resolve_link_ports(&s, &pl)
+        };
+
+        match resolved {
+            Some((out_port_id, in_port_id)) => {
+                if let Some(link) = create_link_by_id(&core, out_port_id, in_port_id) {
+                    new_links.push((pl.group, link));
+                }
+            }
+            None => {
+                still_pending.push(pl);
+            }
+        }
+    }
+
+    if !new_links.is_empty() {
+        debug!("resolved {} links ({} still pending)", new_links.len(), still_pending.len());
+    }
+
+    let mut s = state.borrow_mut();
+    s.pending_links = still_pending;
+    for (group, link) in new_links {
+        s.active_links.entry(group).or_default().push(link);
+    }
 }
 
-struct PwCaptureState {
-    _module_ptr: *mut pw::sys::pw_impl_module,
-    device_name: String,
-    sink_name: String,
+/// Resolve a pending link to (output_port_global_id, input_port_global_id).
+fn resolve_link_ports(s: &PwState, pl: &PendingLink) -> Option<(u32, u32)> {
+    let out_node_id = s.node_name_to_id.get(&pl.out_node_name)?;
+    let in_node_id = s.node_name_to_id.get(&pl.in_node_name)?;
+    let out_port_id = s.port_index.get(&(*out_node_id, pl.out_port_name.clone()))?;
+    let in_port_id = s.port_index.get(&(*in_node_id, pl.in_port_name.clone()))?;
+    Some((*out_port_id, *in_port_id))
 }
 
-// pw_impl_module is thread-local; this is safe because PwLoopbackState
-// is only used within the single PW thread.
-unsafe impl Send for PwLoopbackState {}
-unsafe impl Send for PwCaptureState {}
+/// Create a link using numeric port IDs (globally unique, no name resolution needed).
+fn create_link_by_id(core: &CoreRc, output_port_id: u32, input_port_id: u32) -> Option<Link> {
+    let props = properties! {
+        "link.output.port" => output_port_id.to_string(),
+        "link.input.port" => input_port_id.to_string(),
+        "object.linger" => "false",
+    };
+    match core.create_object::<Link>("link-factory", &props) {
+        Ok(link) => Some(link),
+        Err(e) => {
+            warn!("failed to create link (out_port={output_port_id}, in_port={input_port_id}): {e}");
+            None
+        }
+    }
+}
+
+/// Remove all active and pending links matching a group prefix.
+fn remove_link_group(s: &mut PwState, prefix: &str) {
+    s.active_links.retain(|k, _| !k.starts_with(prefix));
+    s.pending_links.retain(|pl| !pl.group.starts_with(prefix));
+}
+
+// ---------------------------------------------------------------------------
+// Link queueing helpers
+// ---------------------------------------------------------------------------
+
+fn queue_input_to_filter_links(state: &Rc<RefCell<PwState>>, input_ids: &[u32]) {
+    let mut s = state.borrow_mut();
+    for &input_id in input_ids {
+        for ch in &CHANNELS {
+            s.pending_links.push(PendingLink {
+                group: format!("input_to_filter:{input_id}"),
+                out_node_name: format!("mixctl.input.{input_id}"),
+                out_port_name: format!("monitor_{ch}"),
+                in_node_name: "mixctl.mixer".to_string(),
+                in_port_name: format!("in_{input_id}_{ch}"),
+            });
+        }
+    }
+}
+
+fn queue_filter_to_output_links(state: &Rc<RefCell<PwState>>, output_ids: &[u32]) {
+    let mut s = state.borrow_mut();
+    for &output_id in output_ids {
+        for ch in &CHANNELS {
+            s.pending_links.push(PendingLink {
+                group: format!("filter_to_output:{output_id}"),
+                out_node_name: "mixctl.mixer".to_string(),
+                out_port_name: format!("out_{output_id}_{ch}"),
+                in_node_name: format!("mixctl.output.{output_id}"),
+                in_port_name: format!("playback_{ch}"),
+            });
+        }
+    }
+}
+
+fn queue_output_target_links(state: &Rc<RefCell<PwState>>, output_id: u32, device_name: &str) {
+    let mut s = state.borrow_mut();
+    for ch in &CHANNELS {
+        s.pending_links.push(PendingLink {
+            group: format!("output_target:{output_id}"),
+            out_node_name: format!("mixctl.output.{output_id}"),
+            out_port_name: format!("monitor_{ch}"),
+            in_node_name: device_name.to_string(),
+            in_port_name: format!("playback_{ch}"),
+        });
+    }
+}
+
+fn queue_capture_links(state: &Rc<RefCell<PwState>>, input_id: u32, capture_device_name: &str) {
+    let mut s = state.borrow_mut();
+    s.capture_device_names.insert(input_id, capture_device_name.to_string());
+    for ch in &["FL", "FR"] {
+        s.pending_links.push(PendingLink {
+            group: format!("capture:{input_id}"),
+            out_node_name: capture_device_name.to_string(),
+            out_port_name: format!("capture_{ch}"),
+            in_node_name: format!("mixctl.input.{input_id}"),
+            in_port_name: format!("playback_{ch}"),
+        });
+    }
+}
+
+fn queue_stream_links(state: &Rc<RefCell<PwState>>, pw_node_id: u32, input_id: u32, ports: &[(u32, String)]) {
+    let mut s = state.borrow_mut();
+    // Use the numeric node ID as the "node name" for streams
+    let node_name = pw_node_id.to_string();
+    // Ensure the node is in our name→id map
+    s.node_name_to_id.insert(node_name.clone(), pw_node_id);
+    for (_port_global_id, port_name) in ports {
+        if let Some(ch) = port_name.strip_prefix("output_") {
+            s.pending_links.push(PendingLink {
+                group: format!("stream:{pw_node_id}"),
+                out_node_name: node_name.clone(),
+                out_port_name: port_name.clone(),
+                in_node_name: format!("mixctl.input.{input_id}"),
+                in_port_name: format!("playback_{ch}"),
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registry handlers
+// ---------------------------------------------------------------------------
 
 fn handle_registry_global(
     state: &Rc<RefCell<PwState>>,
@@ -342,7 +551,8 @@ fn handle_registry_global(
 ) {
     match global.type_ {
         ObjectType::Metadata => handle_metadata_global(state, event_sender, registry, global),
-        ObjectType::Node => handle_node_global(state, event_sender, registry, global),
+        ObjectType::Node => handle_node_global(state, event_sender, global),
+        ObjectType::Port => handle_port_global(state, global),
         _ => {}
     }
 }
@@ -357,27 +567,19 @@ fn handle_metadata_global(
         Some(p) => p,
         None => return,
     };
-
     if props.get("metadata.name") != Some("default") {
         return;
     }
-
     let mut s = state.borrow_mut();
     if s.metadata.is_some() {
         return;
     }
-
     let metadata = match registry.bind::<pw::metadata::Metadata, _>(global) {
         Ok(m) => m,
-        Err(e) => {
-            warn!("failed to bind metadata: {e}");
-            return;
-        }
+        Err(e) => { warn!("failed to bind metadata: {e}"); return; }
     };
-
     debug!("bound default metadata object (id={})", global.id);
 
-    // Register metadata listener to capture original values before we override
     let listener = metadata
         .add_listener_local()
         .property({
@@ -385,21 +587,17 @@ fn handle_metadata_global(
             move |subject, key, _type, value| {
                 match (subject, key) {
                     (0, Some("default.audio.sink")) => {
-                        event_sender
-                            .send(PwEvent::OriginalDefaultSink {
-                                value: value.map(|v| v.to_string()),
-                            })
-                            .ok();
+                        event_sender.send(PwEvent::OriginalDefaultSink {
+                            value: value.map(|v| v.to_string()),
+                        }).ok();
                     }
                     (id, Some("target.node")) if id != 0 => {
                         if let Some(v) = value {
                             if !v.contains("mixctl.") {
-                                event_sender
-                                    .send(PwEvent::OriginalStreamTarget {
-                                        stream_id: id,
-                                        value: v.to_string(),
-                                    })
-                                    .ok();
+                                event_sender.send(PwEvent::OriginalStreamTarget {
+                                    stream_id: id,
+                                    value: v.to_string(),
+                                }).ok();
                             }
                         }
                     }
@@ -411,249 +609,191 @@ fn handle_metadata_global(
         .register();
     s._metadata_listener = Some(Box::new(listener));
 
-    // If we had a deferred default input, set it now
     if let Some(input_id) = s.deferred_default_input.take() {
         let target = format!("mixctl.input.{input_id}");
         let value = format!("{{\"name\": \"{target}\"}}");
-        metadata.set_property(
-            0,
-            "default.audio.sink",
-            Some("Spa:String:JSON"),
-            Some(&value),
-        );
+        metadata.set_property(0, "default.audio.sink", Some("Spa:String:JSON"), Some(&value));
         debug!("set deferred default audio sink to input {input_id}");
     }
-
     s.metadata = Some(metadata);
 }
 
 fn handle_node_global(
     state: &Rc<RefCell<PwState>>,
     event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
-    registry: &pw::registry::Registry,
     global: &pw::registry::GlobalObject<&pw::spa::utils::dict::DictRef>,
 ) {
     let props = match &global.props {
         Some(p) => p,
         None => return,
     };
-
+    let node_name = props.get("node.name").unwrap_or("");
     let media_class = props.get("media.class").unwrap_or("");
+
+    // Always track node name → ID for our own nodes (needed for link resolution)
+    if node_name.starts_with("mixctl.") {
+        state.borrow_mut().node_name_to_id.insert(node_name.to_string(), global.id);
+        // Try resolving pending links now that we know this node's ID
+        try_resolve_pending_links(state);
+        return;
+    }
 
     match media_class {
         "Stream/Output/Audio" => {
-            let node_name = props.get("node.name").unwrap_or("");
-            // PipeWire's loopback module may prefix playback node names with "output."
             let effective_name = node_name.strip_prefix("output.").unwrap_or(node_name);
-
-            // Track route loopback playback nodes for in-place volume updates (D2)
-            if let Some(route_suffix) = effective_name.strip_prefix("mixctl.route.") {
-                if let Some((iid, oid)) = parse_route_ids(route_suffix) {
-                    match registry.bind::<Node, _>(global) {
-                        Ok(node) => {
-                            let mut s = state.borrow_mut();
-                            s.route_playback_nodes.insert((iid, oid), node);
-                            s.route_playback_node_ids.insert(global.id, (iid, oid));
-                            debug!("tracked route playback node: {node_name} (pw_id={})", global.id);
-                            // Pin this playback node to its output source via metadata
-                            let target = format!("mixctl.output.{oid}");
-                            if let Some(metadata) = &s.metadata {
-                                metadata.set_property(
-                                    global.id,
-                                    "target.object",
-                                    Some("Spa:String:JSON"),
-                                    Some(&target),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            warn!("failed to bind route playback node {node_name}: {e}");
-                        }
-                    }
-                }
-                return;
-            }
-
-            // Pin output-target playback nodes to their hardware device via metadata
-            if let Some(suffix) = effective_name.strip_prefix("mixctl.output-target.") {
-                if let Ok(oid) = suffix.parse::<u32>() {
-                    let s = state.borrow();
-                    if let Some(metadata) = &s.metadata {
-                        // Look up the configured target device for this output
-                        // We stored it when we created the loopback — retrieve from config
-                        if let Some(lb) = s.output_target_devices.get(&oid) {
-                            metadata.set_property(
-                                global.id,
-                                "target.object",
-                                Some("Spa:String:JSON"),
-                                Some(lb),
-                            );
-                            debug!("pinned output-target playback {node_name} → {lb}");
-                        }
-                    }
-                }
-                return;
-            }
-
-            // Filter out all other mixctl.* nodes from stream detection (M4)
             if effective_name.starts_with("mixctl.") {
                 return;
             }
-
             let app_name = props
                 .get("application.name")
                 .or_else(|| props.get("node.name"))
                 .unwrap_or("unknown")
                 .to_string();
             let media_name = props.get("media.name").unwrap_or("").to_string();
-            state.borrow_mut().known_stream_ids.insert(global.id);
-            event_sender
-                .send(PwEvent::StreamAppeared {
-                    pw_node_id: global.id,
-                    app_name,
-                    media_name,
-                })
-                .ok();
+            let mut s = state.borrow_mut();
+            s.known_stream_ids.insert(global.id);
+            // Map numeric node ID so stream links can resolve
+            s.node_name_to_id.insert(global.id.to_string(), global.id);
+            drop(s);
+            event_sender.send(PwEvent::StreamAppeared {
+                pw_node_id: global.id,
+                app_name,
+                media_name,
+            }).ok();
         }
-        "Stream/Input/Audio" => {
-            let node_name = props.get("node.name").unwrap_or("");
-            let effective_name = node_name.strip_prefix("input.").unwrap_or(node_name);
-
-            // Pin route capture nodes to their input sink
-            if let Some(route_suffix) = effective_name.strip_prefix("mixctl.route.") {
-                if let Some((iid, _oid)) = parse_route_ids(route_suffix) {
-                    let s = state.borrow();
-                    if let Some(metadata) = &s.metadata {
-                        let target = format!("mixctl.input.{iid}");
-                        metadata.set_property(
-                            global.id,
-                            "target.object",
-                            Some("Spa:String:JSON"),
-                            Some(&target),
-                        );
-                        debug!("pinned route capture {node_name} → {target}");
-                    }
-                }
-                return;
-            }
-
-            // Pin output-target capture nodes to their output source
-            if let Some(suffix) = effective_name.strip_prefix("mixctl.output-target.") {
-                if let Ok(oid) = suffix.parse::<u32>() {
-                    let s = state.borrow();
-                    if let Some(metadata) = &s.metadata {
-                        let target = format!("mixctl.output.{oid}");
-                        metadata.set_property(
-                            global.id,
-                            "target.object",
-                            Some("Spa:String:JSON"),
-                            Some(&target),
-                        );
-                        debug!("pinned output-target capture {node_name} → {target}");
-                    }
-                }
-                return;
-            }
-
-            // Ignore other mixctl capture nodes
-            if effective_name.starts_with("mixctl.") {
-                return;
-            }
-        }
+        "Stream/Input/Audio" => {}
         "Audio/Source" => {
-            let node_name = props.get("node.name").unwrap_or("");
-            if node_name.starts_with("mixctl.") {
-                return;
-            }
             let name = props
                 .get("node.description")
                 .or_else(|| props.get("node.nick"))
                 .unwrap_or(node_name)
                 .to_string();
-            state.borrow_mut().known_capture_ids.insert(global.id);
-            event_sender
-                .send(PwEvent::CaptureDeviceAppeared {
-                    pw_node_id: global.id,
-                    name,
-                    device_name: node_name.to_string(),
-                })
-                .ok();
+            let mut s = state.borrow_mut();
+            s.known_capture_ids.insert(global.id);
+            s.node_name_to_id.insert(node_name.to_string(), global.id);
+            drop(s);
+            event_sender.send(PwEvent::CaptureDeviceAppeared {
+                pw_node_id: global.id,
+                name,
+                device_name: node_name.to_string(),
+            }).ok();
+            try_resolve_pending_links(state);
         }
         "Audio/Sink" => {
-            let node_name = props.get("node.name").unwrap_or("");
-            if node_name.starts_with("mixctl.") {
-                return;
-            }
             let name = props
                 .get("node.description")
                 .or_else(|| props.get("node.nick"))
                 .unwrap_or(node_name)
                 .to_string();
-            state.borrow_mut().known_playback_ids.insert(global.id);
-            event_sender
-                .send(PwEvent::PlaybackDeviceAppeared {
-                    pw_node_id: global.id,
-                    name,
-                    device_name: node_name.to_string(),
-                })
-                .ok();
+            let mut s = state.borrow_mut();
+            s.known_playback_ids.insert(global.id);
+            s.node_name_to_id.insert(node_name.to_string(), global.id);
+            drop(s);
+            event_sender.send(PwEvent::PlaybackDeviceAppeared {
+                pw_node_id: global.id,
+                name,
+                device_name: node_name.to_string(),
+            }).ok();
+            try_resolve_pending_links(state);
         }
         _ => {}
     }
 }
 
-/// Parse "input_id.output_id" from a route node name suffix.
-fn parse_route_ids(suffix: &str) -> Option<(u32, u32)> {
-    let mut parts = suffix.splitn(2, '.');
-    let iid = parts.next()?.parse::<u32>().ok()?;
-    let oid = parts.next()?.parse::<u32>().ok()?;
-    Some((iid, oid))
+/// Track port globals for registry-driven linking and stream port discovery.
+fn handle_port_global(
+    state: &Rc<RefCell<PwState>>,
+    global: &pw::registry::GlobalObject<&pw::spa::utils::dict::DictRef>,
+) {
+    let props = match &global.props {
+        Some(p) => p,
+        None => return,
+    };
+    let node_id: u32 = match props.get("node.id").and_then(|v| v.parse().ok()) {
+        Some(id) => id,
+        None => return,
+    };
+    let port_name = match props.get("port.name") {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return,
+    };
+
+    let mut s = state.borrow_mut();
+
+    // Store port in the index
+    let key = (node_id, port_name.clone());
+    s.port_index.insert(key.clone(), global.id);
+    s.port_id_to_key.insert(global.id, key);
+
+    // Stream port discovery: if this port belongs to a pending stream route,
+    // cache it and check if we have enough to queue stream links
+    let port_direction = props.get("port.direction").unwrap_or("");
+    if port_direction == "out" {
+        if let Some(&target_input_id) = s.pending_stream_routes.get(&node_id) {
+            let ports = s.stream_port_cache.entry(node_id).or_default();
+            ports.push((global.id, port_name));
+
+            let has_fl = ports.iter().any(|(_, n)| n == "output_FL");
+            let has_fr = ports.iter().any(|(_, n)| n == "output_FR");
+            let port_count = ports.len();
+
+            if (has_fl && has_fr) || port_count >= NUM_CHANNELS {
+                let ports_snapshot = ports.clone();
+                let pw_node_id = node_id;
+                s.pending_stream_routes.remove(&node_id);
+                drop(s);
+                queue_stream_links(state, pw_node_id, target_input_id, &ports_snapshot);
+                try_resolve_pending_links(state);
+                return;
+            }
+        }
+    }
+
+    drop(s);
+    try_resolve_pending_links(state);
 }
+
+// ---------------------------------------------------------------------------
+// Command handler
+// ---------------------------------------------------------------------------
 
 fn handle_command(
     state: &Rc<RefCell<PwState>>,
     event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
     main_loop: &pw::main_loop::MainLoop,
-    context: &pw::context::Context,
-    core: &pw::core::Core,
+    core: &CoreRc,
     cmd: PwCommand,
 ) {
     match cmd {
-        PwCommand::CreateInputSink {
-            input_id,
-            description,
-        } => {
+        PwCommand::CreateInputSink { input_id, description } => {
             create_input_sink(state, event_sender, core, input_id, &description);
+            queue_input_to_filter_links(state, &[input_id]);
+            try_resolve_pending_links(state);
         }
 
         PwCommand::DestroyInputSink { input_id } => {
             let mut s = state.borrow_mut();
-            // Destroy route loopbacks for this input
-            let route_keys: Vec<(u32, u32)> = s
-                .route_loopbacks
-                .keys()
-                .filter(|(iid, _)| *iid == input_id)
-                .cloned()
-                .collect();
-            for key in route_keys {
-                if let Some(lb) = s.route_loopbacks.remove(&key) {
-                    destroy_module(lb._module_ptr);
+            remove_link_group(&mut s, &format!("input_to_filter:{input_id}"));
+            remove_link_group(&mut s, &format!("capture:{input_id}"));
+            s.capture_device_names.remove(&input_id);
+            if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
+                for oidx in 0..s.output_id_to_idx.len() {
+                    s.volume_matrix.set(iidx, oidx, 0.0);
+                }
+                if let Some(ref mut mixer) = s.mixer {
+                    mixer.remove_input_ports(iidx);
+                }
+                let removed_idx = iidx;
+                s.input_id_to_idx.remove(&input_id);
+                for (_, v) in s.input_id_to_idx.iter_mut() {
+                    if *v > removed_idx { *v -= 1; }
                 }
             }
-            // Destroy capture loopback
-            if let Some(lb) = s.capture_loopbacks.remove(&input_id) {
-                destroy_module(lb._module_ptr);
-            }
-            // Clean up level listener
             s.level_listeners.remove(&input_id);
             s.level_peaks.remove(&input_id);
-            // Destroy input sink
             s.input_sink_pw_ids.remove(&input_id);
             if s.input_sinks.remove(&input_id).is_some() {
-                event_sender
-                    .send(PwEvent::InputSinkDestroyed { input_id })
-                    .ok();
-                debug!("destroyed input sink for input {input_id}");
+                event_sender.send(PwEvent::InputSinkDestroyed { input_id }).ok();
             }
         }
 
@@ -661,195 +801,142 @@ fn handle_command(
             set_default_input(state, input_id);
         }
 
-        PwCommand::RenameInputSink {
-            input_id,
-            description,
-        } => {
+        PwCommand::RenameInputSink { input_id, description } => {
             let mut s = state.borrow_mut();
             let existed = s.input_sinks.remove(&input_id).is_some();
+            remove_link_group(&mut s, &format!("input_to_filter:{input_id}"));
             drop(s);
             if existed {
                 create_input_sink(state, event_sender, core, input_id, &description);
+                queue_input_to_filter_links(state, &[input_id]);
+                try_resolve_pending_links(state);
             }
         }
 
-        PwCommand::CreateOutputSource {
-            output_id,
-            description,
-        } => {
+        PwCommand::CreateOutputSource { output_id, description } => {
             create_output_source(state, event_sender, core, output_id, &description);
+            queue_filter_to_output_links(state, &[output_id]);
+            try_resolve_pending_links(state);
         }
 
         PwCommand::DestroyOutputSource { output_id } => {
             let mut s = state.borrow_mut();
-            // Destroy route loopbacks first
-            let route_keys: Vec<(u32, u32)> = s
-                .route_loopbacks
-                .keys()
-                .filter(|(_, oid)| *oid == output_id)
-                .cloned()
-                .collect();
-            for key in route_keys {
-                if let Some(lb) = s.route_loopbacks.remove(&key) {
-                    destroy_module(lb._module_ptr);
+            remove_link_group(&mut s, &format!("filter_to_output:{output_id}"));
+            remove_link_group(&mut s, &format!("output_target:{output_id}"));
+            if let Some(&oidx) = s.output_id_to_idx.get(&output_id) {
+                for iidx in 0..s.input_id_to_idx.len() {
+                    s.volume_matrix.set(iidx, oidx, 0.0);
+                }
+                if let Some(ref mut mixer) = s.mixer {
+                    mixer.remove_output_ports(oidx);
+                }
+                let removed_idx = oidx;
+                s.output_id_to_idx.remove(&output_id);
+                for (_, v) in s.output_id_to_idx.iter_mut() {
+                    if *v > removed_idx { *v -= 1; }
                 }
             }
-            // Destroy output target loopback
-            if let Some(lb) = s.output_target_loopbacks.remove(&output_id) {
-                destroy_module(lb._module_ptr);
-            }
-            // Destroy output source
             if s.output_sources.remove(&output_id).is_some() {
-                event_sender
-                    .send(PwEvent::OutputSourceDestroyed { output_id })
-                    .ok();
-                debug!("destroyed output source for output {output_id}");
+                event_sender.send(PwEvent::OutputSourceDestroyed { output_id }).ok();
             }
         }
 
-        PwCommand::RenameOutputSource {
-            output_id,
-            description,
-        } => {
+        PwCommand::RenameOutputSource { output_id, description } => {
             let mut s = state.borrow_mut();
             let existed = s.output_sources.remove(&output_id).is_some();
+            remove_link_group(&mut s, &format!("filter_to_output:{output_id}"));
             drop(s);
             if existed {
                 create_output_source(state, event_sender, core, output_id, &description);
+                queue_filter_to_output_links(state, &[output_id]);
+                try_resolve_pending_links(state);
             }
         }
 
-        PwCommand::SetRouteLink {
-            input_id,
-            output_id,
-            volume,
-        } => {
+        PwCommand::SetRouteLink { input_id, output_id, volume } => {
             let s = state.borrow();
-            let has_loopback = s.route_loopbacks.contains_key(&(input_id, output_id));
-            let has_playback_node = s.route_playback_nodes.contains_key(&(input_id, output_id));
+            if let (Some(&iidx), Some(&oidx)) = (
+                s.input_id_to_idx.get(&input_id),
+                s.output_id_to_idx.get(&output_id),
+            ) {
+                s.volume_matrix.set(iidx, oidx, volume);
+            }
             drop(s);
+            event_sender.send(PwEvent::RouteLinkCreated { input_id, output_id }).ok();
+        }
 
-            if has_loopback && has_playback_node {
-                // In-place volume update via set_param (avoids audio glitch)
-                let s = state.borrow();
-                if let Some(node) = s.route_playback_nodes.get(&(input_id, output_id)) {
-                    set_node_channel_volumes(node, volume);
-                    debug!("in-place volume update: {input_id} → {output_id} (pw_volume={volume})");
-                }
-            } else {
-                // Fallback: destroy and recreate the loopback module
-                let mut s = state.borrow_mut();
-                if let Some(lb) = s.route_loopbacks.remove(&(input_id, output_id)) {
-                    destroy_module(lb._module_ptr);
-                }
-                drop(s);
-                create_route_loopback(state, event_sender, context, input_id, output_id, volume);
+        PwCommand::DestroyRouteLink { input_id, output_id } => {
+            let s = state.borrow();
+            if let (Some(&iidx), Some(&oidx)) = (
+                s.input_id_to_idx.get(&input_id),
+                s.output_id_to_idx.get(&output_id),
+            ) {
+                s.volume_matrix.set(iidx, oidx, 0.0);
             }
         }
 
-        PwCommand::DestroyRouteLink {
-            input_id,
-            output_id,
-        } => {
-            let mut s = state.borrow_mut();
-            if let Some(lb) = s.route_loopbacks.remove(&(input_id, output_id)) {
-                destroy_module(lb._module_ptr);
-                debug!("destroyed route loopback {input_id} → {output_id}");
+        PwCommand::SetOutputTarget { output_id, device_name } => {
+            remove_link_group(&mut state.borrow_mut(), &format!("output_target:{output_id}"));
+            if let Some(device) = device_name {
+                queue_output_target_links(state, output_id, &device);
+                try_resolve_pending_links(state);
             }
         }
 
-        PwCommand::SetOutputTarget {
-            output_id,
-            device_name,
-        } => {
+        PwCommand::MoveStream { pw_node_id, input_id } => {
             {
                 let mut s = state.borrow_mut();
-                s.output_target_devices.remove(&output_id);
-                if let Some(lb) = s.output_target_loopbacks.remove(&output_id) {
-                    destroy_module(lb._module_ptr);
+                remove_link_group(&mut s, &format!("stream:{pw_node_id}"));
+
+                if let Some(ports) = s.stream_port_cache.get(&pw_node_id) {
+                    let ports_snapshot = ports.clone();
+                    drop(s);
+                    queue_stream_links(state, pw_node_id, input_id, &ports_snapshot);
+                    try_resolve_pending_links(state);
+                } else {
+                    s.pending_stream_routes.insert(pw_node_id, input_id);
                 }
             }
-            if let Some(device) = device_name {
-                let source_name = format!("mixctl.output.{output_id}");
-                create_output_target_loopback(state, context, output_id, &source_name, &device);
-            }
-        }
-
-        PwCommand::MoveStream {
-            pw_node_id,
-            input_id,
-        } => {
+            // Metadata hint for WirePlumber
             let s = state.borrow();
             if let Some(metadata) = &s.metadata {
                 let target_name = format!("mixctl.input.{input_id}");
-                // Set target.object to the node name — WirePlumber checks this
-                // first and matches by node.name when the value is non-numeric.
-                metadata.set_property(
-                    pw_node_id,
-                    "target.object",
-                    Some("Spa:String:JSON"),
-                    Some(&target_name),
-                );
-                // Also set target.node by name as a fallback
+                metadata.set_property(pw_node_id, "target.object", Some("Spa:String:JSON"), Some(&target_name));
                 let value = format!("{{\"name\": \"{target_name}\"}}");
-                metadata.set_property(
-                    pw_node_id,
-                    "target.node",
-                    Some("Spa:String:JSON"),
-                    Some(&value),
-                );
-                debug!("moved stream {pw_node_id} to input {input_id} ({target_name})");
-            } else {
-                warn!("cannot move stream: metadata not available");
+                metadata.set_property(pw_node_id, "target.node", Some("Spa:String:JSON"), Some(&value));
             }
         }
 
-        PwCommand::CreateCaptureInput {
-            input_id,
-            description,
-            capture_device_name,
-        } => {
+        PwCommand::CreateCaptureInput { input_id, description, capture_device_name } => {
             create_input_sink(state, event_sender, core, input_id, &description);
-            let input_sink_name = format!("mixctl.input.{input_id}");
-            create_capture_loopback(state, context, input_id, &capture_device_name, &input_sink_name, 1.0);
+            queue_input_to_filter_links(state, &[input_id]);
+            queue_capture_links(state, input_id, &capture_device_name);
+            try_resolve_pending_links(state);
         }
 
-        PwCommand::BindCaptureToInput {
-            input_id,
-            capture_device_name,
-        } => {
-            let input_sink_name = format!("mixctl.input.{input_id}");
-            create_capture_loopback(state, context, input_id, &capture_device_name, &input_sink_name, 1.0);
+        PwCommand::BindCaptureToInput { input_id, capture_device_name } => {
+            queue_capture_links(state, input_id, &capture_device_name);
+            try_resolve_pending_links(state);
         }
 
         PwCommand::DestroyCaptureLoopback { input_id } => {
             let mut s = state.borrow_mut();
-            if let Some(lb) = s.capture_loopbacks.remove(&input_id) {
-                destroy_module(lb._module_ptr);
-                debug!("destroyed capture loopback for input {input_id}");
-            }
+            remove_link_group(&mut s, &format!("capture:{input_id}"));
+            s.capture_device_names.remove(&input_id);
         }
 
         PwCommand::SetCaptureVolume { input_id, pw_volume } => {
-            let mut s = state.borrow_mut();
-            if let Some(cap) = s.capture_loopbacks.remove(&input_id) {
-                let device_name = cap.device_name.clone();
-                let sink_name = cap.sink_name.clone();
-                destroy_module(cap._module_ptr);
-                drop(s);
-                create_capture_loopback(state, context, input_id, &device_name, &sink_name, pw_volume);
+            let s = state.borrow();
+            if let Some(ns) = s.input_sinks.get(&input_id) {
+                set_node_channel_volumes(&ns._proxy, pw_volume);
             }
         }
 
         PwCommand::EnableLevelMonitoring => {
             let mut s = state.borrow_mut();
-            if s.level_monitoring {
-                return;
-            }
+            if s.level_monitoring { return; }
             s.level_monitoring = true;
             info!("level monitoring enabled");
-
-            // Attach param listeners to all existing input sinks
             let input_ids: Vec<u32> = s.input_sinks.keys().cloned().collect();
             drop(s);
             for input_id in input_ids {
@@ -859,19 +946,14 @@ fn handle_command(
 
         PwCommand::DisableLevelMonitoring => {
             let mut s = state.borrow_mut();
-            if !s.level_monitoring {
-                return;
-            }
+            if !s.level_monitoring { return; }
             s.level_monitoring = false;
             s.level_listeners.clear();
             s.level_peaks.clear();
             info!("level monitoring disabled");
         }
 
-        PwCommand::Shutdown {
-            original_default_sink,
-            original_stream_targets,
-        } => {
+        PwCommand::Shutdown { original_default_sink, original_stream_targets } => {
             cleanup_before_shutdown(state, original_default_sink, &original_stream_targets);
             state.borrow_mut().shutdown = true;
             main_loop.quit();
@@ -879,64 +961,40 @@ fn handle_command(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cleanup
+// ---------------------------------------------------------------------------
+
 fn cleanup_before_shutdown(
     state: &Rc<RefCell<PwState>>,
     original_default_sink: Option<String>,
     original_stream_targets: &HashMap<u32, String>,
 ) {
     let mut s = state.borrow_mut();
-
     if let Some(metadata) = &s.metadata {
-        // 1. Restore original default.audio.sink
-        metadata.set_property(
-            0,
-            "default.audio.sink",
-            Some("Spa:String:JSON"),
-            original_default_sink.as_deref(),
-        );
-
-        // 2. Restore/clear target.node for each known stream
+        metadata.set_property(0, "default.audio.sink", Some("Spa:String:JSON"), original_default_sink.as_deref());
         for &stream_id in &s.known_stream_ids {
             let original = original_stream_targets.get(&stream_id);
-            metadata.set_property(
-                stream_id,
-                "target.node",
-                Some("Spa:String:JSON"),
-                original.map(|s| s.as_str()),
-            );
+            metadata.set_property(stream_id, "target.node", Some("Spa:String:JSON"), original.map(|s| s.as_str()));
         }
     }
-
-    // 3. Destroy capture loopbacks
-    for (_, cap) in s.capture_loopbacks.drain() {
-        destroy_module(cap._module_ptr);
-    }
-
-    // 4. Destroy route loopbacks
-    for (_, lb) in s.route_loopbacks.drain() {
-        destroy_module(lb._module_ptr);
-    }
-
-    // 5. Destroy output target loopbacks
-    for (_, lb) in s.output_target_loopbacks.drain() {
-        destroy_module(lb._module_ptr);
-    }
-
-    // 6. Clear route playback node tracking
-    s.route_playback_nodes.clear();
-    s.route_playback_node_ids.clear();
-
-    // 7. Drop sinks and sources
+    s.active_links.clear();
+    s.pending_links.clear();
+    s.mixer = None;
     s.input_sinks.clear();
     s.output_sources.clear();
-
+    s.core = None;
     info!("PipeWire cleanup complete");
 }
+
+// ---------------------------------------------------------------------------
+// Sink / source creation
+// ---------------------------------------------------------------------------
 
 fn create_input_sink(
     state: &Rc<RefCell<PwState>>,
     event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
-    core: &pw::core::Core,
+    core: &CoreRc,
     input_id: u32,
     description: &str,
 ) {
@@ -962,41 +1020,34 @@ fn create_input_sink(
                 .info({
                     let fired = fired.clone();
                     move |info| {
-                        if fired.get() {
-                            return;
-                        }
+                        if fired.get() { return; }
                         fired.set(true);
                         info_state.borrow_mut().input_sink_pw_ids.insert(input_id, info.id());
-                        ev.send(PwEvent::InputSinkCreated {
-                            input_id,
-                            pw_node_id: info.id(),
-                        })
-                        .ok();
+                        ev.send(PwEvent::InputSinkCreated { input_id, pw_node_id: info.id() }).ok();
                     }
                 })
                 .register();
 
-            state.borrow_mut().input_sinks.insert(
-                input_id,
-                PwNodeState {
-                    _proxy: proxy,
-                    _listener: Box::new(listener),
-                },
-            );
-            debug!("created input sink: {node_name} ({description})");
+            {
+                let mut s = state.borrow_mut();
+                if let Some(ref mut mixer) = s.mixer {
+                    let idx = mixer.add_input_ports(input_id);
+                    s.input_id_to_idx.insert(input_id, idx);
+                }
+            }
 
-            // Auto-attach level listener if monitoring is enabled
+            state.borrow_mut().input_sinks.insert(input_id, PwNodeState {
+                _proxy: proxy,
+                _listener: Box::new(listener),
+            });
+
             if state.borrow().level_monitoring {
                 attach_level_listener(state, event_sender, input_id);
             }
         }
         Err(e) => {
             error!("failed to create input sink {node_name}: {e}");
-            event_sender
-                .send(PwEvent::Error {
-                    message: format!("failed to create input sink: {e}"),
-                })
-                .ok();
+            event_sender.send(PwEvent::Error { message: format!("failed to create input sink: {e}") }).ok();
         }
     }
 }
@@ -1004,13 +1055,11 @@ fn create_input_sink(
 fn create_output_source(
     state: &Rc<RefCell<PwState>>,
     event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
-    core: &pw::core::Core,
+    core: &CoreRc,
     output_id: u32,
     description: &str,
 ) {
     let node_name = format!("mixctl.output.{output_id}");
-    // Audio/Sink so route loopback playback nodes can connect to its playback ports,
-    // and the output-target loopback can capture from its monitor ports.
     let props = properties! {
         "factory.name" => "support.null-audio-sink",
         "node.name" => node_name.clone(),
@@ -1031,238 +1080,49 @@ fn create_output_source(
                 .info({
                     let fired = fired.clone();
                     move |info| {
-                        if fired.get() {
-                            return;
-                        }
+                        if fired.get() { return; }
                         fired.set(true);
-                        ev.send(PwEvent::OutputSourceCreated {
-                            output_id,
-                            pw_node_id: info.id(),
-                        })
-                        .ok();
+                        ev.send(PwEvent::OutputSourceCreated { output_id, pw_node_id: info.id() }).ok();
                     }
                 })
                 .register();
 
-            state.borrow_mut().output_sources.insert(
-                output_id,
-                PwNodeState {
-                    _proxy: proxy,
-                    _listener: Box::new(listener),
-                },
-            );
-            debug!("created output source: {node_name} ({description})");
+            {
+                let mut s = state.borrow_mut();
+                if let Some(ref mut mixer) = s.mixer {
+                    let idx = mixer.add_output_ports(output_id);
+                    s.output_id_to_idx.insert(output_id, idx);
+                }
+            }
+
+            state.borrow_mut().output_sources.insert(output_id, PwNodeState {
+                _proxy: proxy,
+                _listener: Box::new(listener),
+            });
         }
         Err(e) => {
             error!("failed to create output source {node_name}: {e}");
-            event_sender
-                .send(PwEvent::Error {
-                    message: format!("failed to create output source: {e}"),
-                })
-                .ok();
+            event_sender.send(PwEvent::Error { message: format!("failed to create output source: {e}") }).ok();
         }
     }
 }
 
-fn load_module_raw(
-    context: &pw::context::Context,
-    module_name: &str,
-    args: &str,
-) -> *mut pw::sys::pw_impl_module {
-    let name_c = CString::new(module_name).expect("null byte in module name");
-    let args_c = CString::new(args).expect("null byte in module args");
-    unsafe {
-        pw::sys::pw_context_load_module(
-            context.as_raw_ptr(),
-            name_c.as_ptr(),
-            args_c.as_ptr(),
-            std::ptr::null_mut(),
-        )
-    }
-}
-
-fn destroy_module(module_ptr: *mut pw::sys::pw_impl_module) {
-    if !module_ptr.is_null() {
-        unsafe {
-            pw::sys::pw_impl_module_destroy(module_ptr);
-        }
-    }
-}
-
-fn create_route_loopback(
-    state: &Rc<RefCell<PwState>>,
-    event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
-    context: &pw::context::Context,
-    input_id: u32,
-    output_id: u32,
-    pw_volume: f32,
-) {
-    let input_target = format!("mixctl.input.{input_id}");
-    let output_target = format!("mixctl.output.{output_id}");
-    let node_name = format!("mixctl.route.{input_id}.{output_id}");
-
-    let args = format!(
-        "{{ \
-            node.name = \"{node_name}\" \
-            node.description = \"Route {input_id} to {output_id}\" \
-            capture.props = {{ \
-                target.object = \"{input_target}\" \
-                stream.capture.sink = true \
-                node.autoconnect = false \
-                audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
-            }} \
-            playback.props = {{ \
-                target.object = \"{output_target}\" \
-                node.autoconnect = false \
-                audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
-                channelmix.normalize = false \
-                channelmix.volume = {pw_volume} \
-            }} \
-        }}"
-    );
-
-    let module_ptr = load_module_raw(context, "libpipewire-module-loopback", &args);
-
-    if module_ptr.is_null() {
-        error!("failed to create route loopback {input_id} → {output_id}");
-        event_sender
-            .send(PwEvent::Error {
-                message: format!("failed to create route loopback {input_id} → {output_id}"),
-            })
-            .ok();
-        return;
-    }
-
-    state.borrow_mut().route_loopbacks.insert(
-        (input_id, output_id),
-        PwLoopbackState {
-            _module_ptr: module_ptr,
-        },
-    );
-
-    event_sender
-        .send(PwEvent::RouteLinkCreated {
-            input_id,
-            output_id,
-        })
-        .ok();
-    debug!("created route loopback: {input_id} → {output_id} (pw_volume={pw_volume})");
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn set_default_input(state: &Rc<RefCell<PwState>>, input_id: u32) {
     let s = state.borrow();
     if let Some(metadata) = &s.metadata {
         let target = format!("mixctl.input.{input_id}");
         let value = format!("{{\"name\": \"{target}\"}}");
-        metadata.set_property(
-            0,
-            "default.audio.sink",
-            Some("Spa:String:JSON"),
-            Some(&value),
-        );
-        debug!("set default audio sink to input {input_id}");
+        metadata.set_property(0, "default.audio.sink", Some("Spa:String:JSON"), Some(&value));
     } else {
-        debug!("metadata not yet available, deferring default input {input_id}");
         drop(s);
         state.borrow_mut().deferred_default_input = Some(input_id);
     }
 }
 
-fn create_output_target_loopback(
-    state: &Rc<RefCell<PwState>>,
-    context: &pw::context::Context,
-    output_id: u32,
-    source_name: &str,
-    device_name: &str,
-) {
-    let node_name = format!("mixctl.output-target.{output_id}");
-
-    let args = format!(
-        "{{ \
-            node.name = \"{node_name}\" \
-            node.description = \"Output {output_id} to Device\" \
-            capture.props = {{ \
-                target.object = \"{source_name}\" \
-                stream.capture.sink = true \
-                node.autoconnect = false \
-                audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
-            }} \
-            playback.props = {{ \
-                target.object = \"{device_name}\" \
-                node.autoconnect = false \
-                audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
-            }} \
-        }}"
-    );
-
-    let module_ptr = load_module_raw(context, "libpipewire-module-loopback", &args);
-
-    if module_ptr.is_null() {
-        error!("failed to create output target loopback for output {output_id}");
-        return;
-    }
-
-    let mut s = state.borrow_mut();
-    s.output_target_devices.insert(output_id, device_name.to_string());
-    s.output_target_loopbacks.insert(
-        output_id,
-        PwLoopbackState {
-            _module_ptr: module_ptr,
-        },
-    );
-    debug!("created output target loopback: {source_name} → {device_name}");
-}
-
-fn create_capture_loopback(
-    state: &Rc<RefCell<PwState>>,
-    context: &pw::context::Context,
-    input_id: u32,
-    capture_device_name: &str,
-    input_sink_name: &str,
-    pw_volume: f32,
-) {
-    let node_name = format!("mixctl.capture.{input_id}");
-
-    let args = format!(
-        "{{ \
-            node.name = \"{node_name}\" \
-            node.description = \"Capture to Input {input_id}\" \
-            capture.props = {{ \
-                target.object = \"{capture_device_name}\" \
-                node.autoconnect = false \
-                audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
-            }} \
-            playback.props = {{ \
-                target.object = \"{input_sink_name}\" \
-                node.autoconnect = false \
-                audio.position = FL,FR,FC,LFE,RL,RR,SL,SR \
-                channelmix.normalize = false \
-                channelmix.volume = {pw_volume} \
-            }} \
-        }}"
-    );
-
-    let module_ptr = load_module_raw(context, "libpipewire-module-loopback", &args);
-
-    if module_ptr.is_null() {
-        error!("failed to create capture loopback for input {input_id}");
-        return;
-    }
-
-    state.borrow_mut().capture_loopbacks.insert(
-        input_id,
-        PwCaptureState {
-            _module_ptr: module_ptr,
-            device_name: capture_device_name.to_string(),
-            sink_name: input_sink_name.to_string(),
-        },
-    );
-    debug!("created capture loopback: {capture_device_name} → {input_sink_name}");
-}
-
-/// Attach a param listener to an input sink node for level monitoring.
-/// The listener receives monitorVolumes updates from PipeWire, reduces to mono peak,
-/// and batches updates to send at ~20Hz via PwEvent::LevelUpdate.
 fn attach_level_listener(
     state: &Rc<RefCell<PwState>>,
     event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
@@ -1273,10 +1133,7 @@ fn attach_level_listener(
         Some(ns) => &ns._proxy,
         None => return,
     };
-
-    // Subscribe to Props params so PipeWire pushes monitorVolumes updates
     node.subscribe_params(&[ParamType::Props]);
-
     let level_state = state.clone();
     let level_ev = event_sender.clone();
     let listener = node
@@ -1291,8 +1148,6 @@ fn attach_level_listener(
                                     let peak = volumes.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
                                     let mut ls = level_state.borrow_mut();
                                     ls.level_peaks.insert(input_id, peak);
-
-                                    // Throttle: only send if enough time has passed
                                     let now = Instant::now();
                                     if now.duration_since(ls.level_last_sent).as_millis() >= LEVEL_THROTTLE_MS {
                                         ls.level_last_sent = now;
@@ -1308,14 +1163,11 @@ fn attach_level_listener(
             }
         })
         .register();
-
     drop(s);
     state.borrow_mut().level_listeners.insert(input_id, Box::new(listener));
 }
 
-/// Update channel volumes on a node in-place via set_param, avoiding module destroy/recreate.
 fn set_node_channel_volumes(node: &Node, pw_volume: f32) {
-    // Build a Props object with channelVolumes = [vol × 8 channels]
     let volumes = vec![pw_volume; 8];
     let object = Object {
         type_: SpaTypes::ObjectParamProps.as_raw(),
@@ -1325,19 +1177,14 @@ fn set_node_channel_volumes(node: &Node, pw_volume: f32) {
             Value::ValueArray(ValueArray::Float(volumes)),
         )],
     };
-
     let value = Value::Object(object);
     let mut buf = Vec::<u8>::new();
     match PodSerializer::serialize(Cursor::new(&mut buf), &value) {
         Ok(_) => {
             if let Some(pod) = Pod::from_bytes(&buf) {
                 node.set_param(ParamType::Props, 0, pod);
-            } else {
-                warn!("failed to parse serialized volume pod");
             }
         }
-        Err(e) => {
-            warn!("failed to serialize volume pod: {e:?}");
-        }
+        Err(e) => warn!("failed to serialize volume pod: {e:?}"),
     }
 }

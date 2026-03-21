@@ -30,13 +30,13 @@ pub enum PwCommand {
         output_id: u32,
         description: String,
     },
-    /// Set or recreate a route loopback with combined volume (route_vol * output_vol).
-    /// Muting is encoded as pw_volume = 0.0.
+    /// Update the volume matrix entry for a route. No PW objects created/destroyed.
     SetRouteLink {
         input_id: u32,
         output_id: u32,
         volume: f32,
     },
+    /// Zero the volume matrix entry for a route. No PW objects created/destroyed.
     DestroyRouteLink {
         input_id: u32,
         output_id: u32,
@@ -58,7 +58,7 @@ pub enum PwCommand {
         description: String,
         capture_device_name: String,
     },
-    /// Bind a capture device to an existing input (only creates the capture loopback).
+    /// Bind a capture device to an existing input (creates direct links).
     BindCaptureToInput {
         input_id: u32,
         capture_device_name: String,
