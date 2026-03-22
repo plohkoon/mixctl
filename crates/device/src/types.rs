@@ -41,6 +41,8 @@ pub enum DeviceEvent {
     },
     /// Rotate to next output tab.
     NextOutput,
+    /// Rotate to previous output tab.
+    PrevOutput,
     /// Move to previous page of inputs.
     PageLeft,
     /// Move to next page of inputs.

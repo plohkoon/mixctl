@@ -1,5 +1,11 @@
+use std::collections::HashMap;
+
+use mixctl_core::config_sections::BeacnConfig;
 use mixctl_core::dbus::MixCtlProxy;
-use mixctl_core::{AppRuleInfo, CaptureDeviceInfo, ComponentInfo, OutputInfo, RouteInfo, StreamInfo, InputInfo};
+use mixctl_core::{
+    AppRuleInfo, CaptureDeviceInfo, CompressorInfo, ComponentInfo, DeesserInfo,
+    EqBandInfo, GateInfo, InputInfo, LimiterInfo, OutputInfo, RouteInfo, StreamInfo,
+};
 
 /// Colour palette for cycling input/output colours.
 pub const COLOR_PALETTE: &[&str] = &[
@@ -16,6 +22,7 @@ pub enum Panel {
     Rules,
     Capture,
     Settings,
+    Dsp,
 }
 
 /// Actions dispatched from key events.
@@ -38,6 +45,11 @@ pub enum AppAction {
     UnbindCapture,
     CycleInputColor,
     CycleOutputColor,
+    ToggleEq,
+    ToggleGate,
+    ToggleDeesser,
+    ToggleCompressor,
+    ToggleLimiter,
 }
 
 /// Signals received from D-Bus, pre-processed with fresh data.
@@ -55,6 +67,19 @@ pub enum DaemonSignal {
     RulesRefreshed(Vec<AppRuleInfo>),
     CaptureDevicesRefreshed(Vec<CaptureDeviceInfo>),
     ComponentsRefreshed(Vec<ComponentInfo>),
+    BeacnConfigRefreshed(BeacnConfig),
+    InputDspRefreshed {
+        input_id: u32,
+        eq_enabled: bool,
+        eq_bands: Vec<EqBandInfo>,
+        gate: GateInfo,
+        deesser: DeesserInfo,
+    },
+    OutputDspRefreshed {
+        output_id: u32,
+        compressor: CompressorInfo,
+        limiter: LimiterInfo,
+    },
 }
 
 pub struct AppState {
@@ -75,7 +100,16 @@ pub struct AppState {
     pub capture_cursor: usize,
     pub settings_cursor: usize,
     pub beacn_connected: bool,
+    pub beacn_config: Option<BeacnConfig>,
     pub show_help: bool,
+
+    // DSP state caches
+    pub dsp_input_eq: HashMap<u32, (bool, Vec<EqBandInfo>)>,
+    pub dsp_input_gate: HashMap<u32, GateInfo>,
+    pub dsp_input_deesser: HashMap<u32, DeesserInfo>,
+    pub dsp_output_compressor: HashMap<u32, CompressorInfo>,
+    pub dsp_output_limiter: HashMap<u32, LimiterInfo>,
+    pub dsp_cursor: usize,
 }
 
 impl AppState {
@@ -87,6 +121,7 @@ impl AppState {
         rules: Vec<AppRuleInfo>,
         capture_devices: Vec<CaptureDeviceInfo>,
         components: Vec<ComponentInfo>,
+        beacn_config: Option<BeacnConfig>,
     ) -> Self {
         let beacn_connected = components.iter().any(|c| c.component_type == "beacn");
         Self {
@@ -106,7 +141,15 @@ impl AppState {
             capture_cursor: 0,
             settings_cursor: 0,
             beacn_connected,
+            beacn_config,
             show_help: false,
+
+            dsp_input_eq: HashMap::new(),
+            dsp_input_gate: HashMap::new(),
+            dsp_input_deesser: HashMap::new(),
+            dsp_output_compressor: HashMap::new(),
+            dsp_output_limiter: HashMap::new(),
+            dsp_cursor: 0,
         }
     }
 
@@ -144,6 +187,13 @@ impl AppState {
         } else {
             self.settings_cursor = 0;
         }
+        // DSP panel cursor: total selectable items = inputs + outputs
+        let dsp_items = self.inputs.len() + self.outputs.len();
+        if dsp_items > 0 {
+            self.dsp_cursor = self.dsp_cursor.min(dsp_items - 1);
+        } else {
+            self.dsp_cursor = 0;
+        }
     }
 
     pub fn handle_signal(&mut self, signal: DaemonSignal) {
@@ -172,6 +222,18 @@ impl AppState {
                 self.beacn_connected = components.iter().any(|c| c.component_type == "beacn");
                 self.components = components;
             }
+            DaemonSignal::BeacnConfigRefreshed(config) => {
+                self.beacn_config = Some(config);
+            }
+            DaemonSignal::InputDspRefreshed { input_id, eq_enabled, eq_bands, gate, deesser } => {
+                self.dsp_input_eq.insert(input_id, (eq_enabled, eq_bands));
+                self.dsp_input_gate.insert(input_id, gate);
+                self.dsp_input_deesser.insert(input_id, deesser);
+            }
+            DaemonSignal::OutputDspRefreshed { output_id, compressor, limiter } => {
+                self.dsp_output_compressor.insert(output_id, compressor);
+                self.dsp_output_limiter.insert(output_id, limiter);
+            }
         }
         self.clamp_cursors();
     }
@@ -186,17 +248,19 @@ impl AppState {
                     Panel::Outputs => Panel::Rules,
                     Panel::Rules => Panel::Capture,
                     Panel::Capture => Panel::Settings,
-                    Panel::Settings => Panel::Routes,
+                    Panel::Settings => Panel::Dsp,
+                    Panel::Dsp => Panel::Routes,
                 };
             }
             AppAction::PrevPanel => {
                 self.active_panel = match self.active_panel {
-                    Panel::Routes => Panel::Settings,
+                    Panel::Routes => Panel::Dsp,
                     Panel::Streams => Panel::Routes,
                     Panel::Outputs => Panel::Streams,
                     Panel::Rules => Panel::Outputs,
                     Panel::Capture => Panel::Rules,
                     Panel::Settings => Panel::Capture,
+                    Panel::Dsp => Panel::Settings,
                 };
             }
             AppAction::CursorUp => {
@@ -207,6 +271,7 @@ impl AppState {
                     Panel::Rules => self.rule_cursor = self.rule_cursor.saturating_sub(1),
                     Panel::Capture => self.capture_cursor = self.capture_cursor.saturating_sub(1),
                     Panel::Settings => self.settings_cursor = self.settings_cursor.saturating_sub(1),
+                    Panel::Dsp => self.dsp_cursor = self.dsp_cursor.saturating_sub(1),
                 }
             }
             AppAction::CursorDown => {
@@ -240,6 +305,12 @@ impl AppState {
                         let total = self.inputs.len() + self.outputs.len();
                         if self.settings_cursor + 1 < total {
                             self.settings_cursor += 1;
+                        }
+                    }
+                    Panel::Dsp => {
+                        let total = self.inputs.len() + self.outputs.len();
+                        if self.dsp_cursor + 1 < total {
+                            self.dsp_cursor += 1;
                         }
                     }
                 }
@@ -354,6 +425,55 @@ impl AppState {
                     proxy.set_output_color(output.id, next).await.ok();
                 }
             }
+            AppAction::ToggleEq => {
+                if let Some(input) = self.dsp_selected_input() {
+                    let current = self.dsp_input_eq.get(&input.id).map(|(e, _)| *e).unwrap_or(false);
+                    proxy.set_input_eq_enabled(input.id, !current).await.ok();
+                }
+            }
+            AppAction::ToggleGate => {
+                if let Some(input) = self.dsp_selected_input() {
+                    let current = self.dsp_input_gate.get(&input.id).map(|g| g.enabled).unwrap_or(false);
+                    proxy.set_input_gate_enabled(input.id, !current).await.ok();
+                }
+            }
+            AppAction::ToggleDeesser => {
+                if let Some(input) = self.dsp_selected_input() {
+                    let current = self.dsp_input_deesser.get(&input.id).map(|d| d.enabled).unwrap_or(false);
+                    proxy.set_input_deesser_enabled(input.id, !current).await.ok();
+                }
+            }
+            AppAction::ToggleCompressor => {
+                if let Some(output) = self.dsp_selected_output() {
+                    let current = self.dsp_output_compressor.get(&output.id).map(|c| c.enabled).unwrap_or(false);
+                    proxy.set_output_compressor_enabled(output.id, !current).await.ok();
+                }
+            }
+            AppAction::ToggleLimiter => {
+                if let Some(output) = self.dsp_selected_output() {
+                    let current = self.dsp_output_limiter.get(&output.id).map(|l| l.enabled).unwrap_or(false);
+                    proxy.set_output_limiter_enabled(output.id, !current).await.ok();
+                }
+            }
+        }
+    }
+
+    /// If the DSP cursor is on an input row, return that input.
+    pub fn dsp_selected_input(&self) -> Option<&InputInfo> {
+        if self.dsp_cursor < self.inputs.len() {
+            self.inputs.get(self.dsp_cursor)
+        } else {
+            None
+        }
+    }
+
+    /// If the DSP cursor is on an output row, return that output.
+    pub fn dsp_selected_output(&self) -> Option<&OutputInfo> {
+        if self.dsp_cursor >= self.inputs.len() {
+            let idx = self.dsp_cursor - self.inputs.len();
+            self.outputs.get(idx)
+        } else {
+            None
         }
     }
 }
@@ -365,4 +485,129 @@ fn next_palette_color(current: &str) -> &'static str {
         .map(|i| (i + 1) % COLOR_PALETTE.len())
         .unwrap_or(0);
     COLOR_PALETTE[idx]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mixctl_core::{InputInfo, OutputInfo, RouteInfo};
+
+    fn test_state() -> AppState {
+        AppState::new(
+            vec![InputInfo { id: 1, name: "Sys".into(), color: "#000".into() }],
+            vec![OutputInfo { id: 5, name: "Out".into(), color: "#fff".into(), volume: 100, muted: false, target_device: String::new() }],
+            vec![RouteInfo { input_id: 1, output_id: 5, volume: 80, muted: false }],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            None,
+        )
+    }
+
+    #[test]
+    fn panel_cycling_wraps() {
+        let mut state = test_state();
+        // Start at Dsp (last panel) and go next -> should wrap to Routes
+        state.active_panel = Panel::Dsp;
+        // Simulate NextPanel
+        state.active_panel = match state.active_panel {
+            Panel::Routes => Panel::Streams,
+            Panel::Streams => Panel::Outputs,
+            Panel::Outputs => Panel::Rules,
+            Panel::Rules => Panel::Capture,
+            Panel::Capture => Panel::Settings,
+            Panel::Settings => Panel::Dsp,
+            Panel::Dsp => Panel::Routes,
+        };
+        assert_eq!(state.active_panel, Panel::Routes);
+
+        // From Routes, PrevPanel should go to Dsp
+        state.active_panel = match state.active_panel {
+            Panel::Routes => Panel::Dsp,
+            Panel::Streams => Panel::Routes,
+            Panel::Outputs => Panel::Streams,
+            Panel::Rules => Panel::Outputs,
+            Panel::Capture => Panel::Rules,
+            Panel::Settings => Panel::Capture,
+            Panel::Dsp => Panel::Settings,
+        };
+        assert_eq!(state.active_panel, Panel::Dsp);
+    }
+
+    #[test]
+    fn cursor_clamp_on_empty() {
+        let mut state = test_state();
+        state.routes.clear();
+        state.route_cursor = 5;
+        // Trigger clamp via a signal
+        state.handle_signal(DaemonSignal::StreamsRefreshed(vec![]));
+        assert_eq!(state.route_cursor, 0);
+    }
+
+    #[test]
+    fn signal_routes_refreshed() {
+        let mut state = test_state();
+        let updated_route = RouteInfo { input_id: 1, output_id: 5, volume: 42, muted: true };
+        state.handle_signal(DaemonSignal::RouteUpdated(updated_route));
+        let route = state.routes.iter().find(|r| r.input_id == 1 && r.output_id == 5).unwrap();
+        assert_eq!(route.volume, 42);
+        assert!(route.muted);
+    }
+
+    #[test]
+    fn signal_full_refresh() {
+        let mut state = test_state();
+        let new_inputs = vec![
+            InputInfo { id: 10, name: "New".into(), color: "#abc".into() },
+            InputInfo { id: 11, name: "New2".into(), color: "#def".into() },
+        ];
+        let new_outputs = vec![
+            OutputInfo { id: 20, name: "Out2".into(), color: "#111".into(), volume: 50, muted: true, target_device: String::new() },
+        ];
+        let new_routes = vec![
+            RouteInfo { input_id: 10, output_id: 20, volume: 60, muted: false },
+        ];
+        state.handle_signal(DaemonSignal::FullRefresh {
+            inputs: new_inputs,
+            outputs: new_outputs,
+            routes: new_routes,
+            streams: vec![],
+        });
+        assert_eq!(state.inputs.len(), 2);
+        assert_eq!(state.outputs.len(), 1);
+        assert_eq!(state.routes.len(), 1);
+        assert_eq!(state.inputs[0].id, 10);
+        assert_eq!(state.outputs[0].volume, 50);
+    }
+
+    #[test]
+    fn cursor_stays_in_bounds_after_shrink() {
+        let mut state = test_state();
+        // Add more routes so cursor can be at position 3
+        state.routes = vec![
+            RouteInfo { input_id: 1, output_id: 5, volume: 80, muted: false },
+            RouteInfo { input_id: 2, output_id: 5, volume: 80, muted: false },
+            RouteInfo { input_id: 3, output_id: 5, volume: 80, muted: false },
+            RouteInfo { input_id: 4, output_id: 5, volume: 80, muted: false },
+        ];
+        state.route_cursor = 3;
+
+        // Now shrink the routes list to 2 items via a FullRefresh
+        state.handle_signal(DaemonSignal::FullRefresh {
+            inputs: vec![InputInfo { id: 1, name: "Sys".into(), color: "#000".into() }],
+            outputs: vec![OutputInfo { id: 5, name: "Out".into(), color: "#fff".into(), volume: 100, muted: false, target_device: String::new() }],
+            routes: vec![
+                RouteInfo { input_id: 1, output_id: 5, volume: 80, muted: false },
+                RouteInfo { input_id: 2, output_id: 5, volume: 80, muted: false },
+            ],
+            streams: vec![],
+        });
+        assert!(
+            state.route_cursor < state.routes.len(),
+            "cursor {} should be < routes len {}",
+            state.route_cursor,
+            state.routes.len()
+        );
+    }
 }

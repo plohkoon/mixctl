@@ -308,6 +308,17 @@ async fn main() {
                 );
                 cmd_tx.send(DeviceCommand::UpdateState(mixer.build_snapshot())).ok();
             }
+            DeviceEvent::PrevOutput => {
+                let count = mixer.outputs.len();
+                mixer.current_output_index = if mixer.current_output_index == 0 { count - 1 } else { mixer.current_output_index - 1 };
+                info!(
+                    "output: {} ({}/{})",
+                    mixer.outputs[mixer.current_output_index].name,
+                    mixer.current_output_index + 1,
+                    count
+                );
+                cmd_tx.send(DeviceCommand::UpdateState(mixer.build_snapshot())).ok();
+            }
             DeviceEvent::PageLeft => {
                 if mixer.current_page > 0 {
                     mixer.current_page -= 1;

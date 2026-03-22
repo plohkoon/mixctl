@@ -6,7 +6,7 @@
 //! - Fixed-size state arrays
 //! - Each processor has an `enabled` flag; when false, processing is a no-op (zero CPU)
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::mixer::{MAX_SLOTS, NUM_CHANNELS};
 
@@ -102,6 +102,61 @@ impl BiquadCoeffs {
     }
 }
 
+impl BiquadCoeffs {
+    /// Compute magnitude response in dB at a given frequency.
+    #[allow(dead_code)]
+    pub fn magnitude_db(&self, freq: f32, sample_rate: f32) -> f32 {
+        let w = 2.0 * std::f32::consts::PI * freq / sample_rate;
+        let (sin_w, cos_w) = w.sin_cos();
+        let (sin_2w, cos_2w) = (2.0 * w).sin_cos();
+
+        // H(z) = (b0 + b1*z^-1 + b2*z^-2) / (1 + a1*z^-1 + a2*z^-2)
+        // at z = e^(jw): z^-1 = cos(w) - j*sin(w), z^-2 = cos(2w) - j*sin(2w)
+        let num_re = self.b0 + self.b1 * cos_w + self.b2 * cos_2w;
+        let num_im = -(self.b1 * sin_w + self.b2 * sin_2w);
+        let den_re = 1.0 + self.a1 * cos_w + self.a2 * cos_2w;
+        let den_im = -(self.a1 * sin_w + self.a2 * sin_2w);
+
+        let num_mag_sq = num_re * num_re + num_im * num_im;
+        let den_mag_sq = den_re * den_re + den_im * den_im;
+
+        if den_mag_sq < 1e-20 {
+            return 0.0;
+        }
+        10.0 * (num_mag_sq / den_mag_sq).log10()
+    }
+}
+
+/// Number of points for frequency response curve.
+#[allow(dead_code)]
+pub const FREQ_RESPONSE_POINTS: usize = 150;
+
+/// Compute the combined frequency response of 8 cascaded EQ bands.
+/// Returns (frequency_hz, magnitude_db) pairs on a log scale from 20Hz to 20kHz.
+#[allow(dead_code)]
+pub fn compute_eq_response(
+    coeffs: &[BiquadCoeffs; NUM_EQ_BANDS],
+    sample_rate: f32,
+) -> Vec<(f32, f32)> {
+    let mut points = Vec::with_capacity(FREQ_RESPONSE_POINTS);
+    let log_min = 20.0_f32.ln();
+    let log_max = 20000.0_f32.ln();
+
+    for i in 0..FREQ_RESPONSE_POINTS {
+        let t = i as f32 / (FREQ_RESPONSE_POINTS - 1) as f32;
+        let freq = (log_min + t * (log_max - log_min)).exp();
+
+        let mut total_db = 0.0_f32;
+        for band in 0..NUM_EQ_BANDS {
+            total_db += coeffs[band].magnitude_db(freq, sample_rate);
+        }
+        // Clamp to ±30 dB for display
+        total_db = total_db.clamp(-30.0, 30.0);
+        points.push((freq, total_db));
+    }
+    points
+}
+
 /// Biquad filter state (2 samples of history).
 #[derive(Clone, Copy, Default)]
 pub struct BiquadState {
@@ -143,26 +198,6 @@ pub enum EqBandType {
     Peaking,
     HighShelf,
     Bypass,
-}
-
-/// Configuration for one EQ band.
-#[derive(Clone, Copy)]
-pub struct EqBandConfig {
-    pub band_type: EqBandType,
-    pub frequency: f32,
-    pub gain_db: f32,
-    pub q: f32,
-}
-
-impl Default for EqBandConfig {
-    fn default() -> Self {
-        Self {
-            band_type: EqBandType::Peaking,
-            frequency: 1000.0,
-            gain_db: 0.0,
-            q: 1.4,
-        }
-    }
 }
 
 /// Per-input EQ state: 8 biquad filters × NUM_CHANNELS.
@@ -296,6 +331,8 @@ pub struct InputDeesserState {
     pub enabled: AtomicBool,
     pub threshold_linear: f32,
     pub ratio: f32,
+    /// Pre-computed exponent: `1.0 / ratio - 1.0` (avoids per-sample powf)
+    pub ratio_exponent: f32,
     pub hpf_coeffs: BiquadCoeffs,
     pub hpf_state: [BiquadState; NUM_CHANNELS],
     pub envelope: [f32; NUM_CHANNELS],
@@ -307,6 +344,7 @@ impl Default for InputDeesserState {
             enabled: AtomicBool::new(false),
             threshold_linear: 0.1, // ~-20 dB
             ratio: 4.0,
+            ratio_exponent: 1.0 / 4.0 - 1.0,
             hpf_coeffs: BiquadCoeffs::high_pass(6000.0, 0.7, 48000.0),
             hpf_state: [BiquadState::default(); NUM_CHANNELS],
             envelope: [0.0; NUM_CHANNELS],
@@ -340,7 +378,7 @@ pub fn apply_deesser(ds: &mut InputDeesserState, ch: usize, buf: *mut f32, n_sam
             // Gain reduction when sibilance exceeds threshold
             if ds.envelope[ch] > ds.threshold_linear {
                 let over = ds.envelope[ch] / ds.threshold_linear;
-                let gain_reduction = over.powf(1.0 / ds.ratio - 1.0);
+                let gain_reduction = over.powf(ds.ratio_exponent);
                 *buf.add(s) = sample * gain_reduction;
             }
         }
@@ -356,10 +394,11 @@ pub struct OutputCompressorState {
     pub enabled: AtomicBool,
     pub threshold_linear: f32,
     pub ratio: f32,
+    /// Pre-computed exponent: `1.0 / ratio - 1.0` (avoids per-sample powf)
+    pub ratio_exponent: f32,
     pub attack_coeff: f32,
     pub release_coeff: f32,
     pub makeup_gain: f32,    // linear
-    pub knee_width: f32,     // in linear amplitude
     pub envelope: [f32; NUM_CHANNELS],
 }
 
@@ -369,10 +408,10 @@ impl Default for OutputCompressorState {
             enabled: AtomicBool::new(false),
             threshold_linear: 0.125, // ~-18 dB
             ratio: 4.0,
+            ratio_exponent: 1.0 / 4.0 - 1.0,
             attack_coeff: 0.9995,
             release_coeff: 0.99995,
             makeup_gain: 1.0,
-            knee_width: 0.05,
             envelope: [0.0; NUM_CHANNELS],
         }
     }
@@ -401,7 +440,7 @@ pub fn apply_compressor(comp: &mut OutputCompressorState, ch: usize, buf: *mut f
             // Gain computer
             let gain = if comp.envelope[ch] > comp.threshold_linear {
                 let over = comp.envelope[ch] / comp.threshold_linear;
-                let gain_reduction = over.powf(1.0 / comp.ratio - 1.0);
+                let gain_reduction = over.powf(comp.ratio_exponent);
                 gain_reduction * comp.makeup_gain
             } else {
                 comp.makeup_gain
@@ -551,5 +590,216 @@ mod tests {
         for &sample in &buf {
             assert!(sample.abs() <= 0.51, "sample={sample} exceeds ceiling");
         }
+    }
+
+    fn sine_wave(freq: f32, sample_rate: f32, n_samples: usize) -> Vec<f32> {
+        (0..n_samples)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate).sin())
+            .collect()
+    }
+
+    fn rms(buf: &[f32]) -> f32 {
+        (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt()
+    }
+
+    fn peak(buf: &[f32]) -> f32 {
+        buf.iter().map(|x| x.abs()).fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    fn eq_boost_increases_signal() {
+        let sample_rate = 48000.0;
+        let n = 4096;
+        let input = sine_wave(1000.0, sample_rate, n);
+        let input_rms = rms(&input);
+
+        let mut eq = InputEqState::default();
+        eq.enabled.store(true, Ordering::Relaxed);
+        // Set band 0 to peaking at 1kHz with +12dB
+        eq.coeffs[0][0] = BiquadCoeffs::peaking(1000.0, 12.0, 1.4, sample_rate);
+
+        let mut output = input.clone();
+        apply_eq(&mut eq, 0, output.as_mut_ptr(), n as u32);
+
+        let output_rms = rms(&output);
+        assert!(
+            output_rms > input_rms,
+            "EQ boost should increase signal: output_rms={output_rms} input_rms={input_rms}"
+        );
+    }
+
+    #[test]
+    fn gate_closes_on_silence() {
+        let mut gate = InputGateState::default();
+        gate.enabled.store(true, Ordering::Relaxed);
+        gate.config.hold_samples = 100;
+        gate.gain[0] = 1.0;
+
+        // Feed silence (zeros) for enough samples to exhaust hold
+        let n = 10_000;
+        let mut buf = vec![0.0_f32; n];
+        apply_gate(&mut gate, 0, buf.as_mut_ptr(), n as u32);
+
+        assert!(
+            gate.gain[0] < 0.01,
+            "gate gain should drop near 0 on silence, got {}",
+            gate.gain[0]
+        );
+    }
+
+    #[test]
+    fn gate_opens_on_loud_signal() {
+        let mut gate = InputGateState::default();
+        gate.enabled.store(true, Ordering::Relaxed);
+        gate.config.threshold_linear = 0.01;
+        // Start with gate closed
+        gate.gain[0] = 0.0;
+
+        // Feed a loud signal
+        let mut buf = sine_wave(440.0, 48000.0, 4096);
+        apply_gate(&mut gate, 0, buf.as_mut_ptr(), buf.len() as u32);
+
+        // The output should have non-zero samples (gate opened)
+        let out_peak = peak(&buf);
+        assert!(
+            out_peak > 0.1,
+            "gate should open on loud signal, got peak={}",
+            out_peak
+        );
+    }
+
+    #[test]
+    fn deesser_reduces_high_freq() {
+        let sample_rate = 48000.0;
+        let n = 8192;
+        // Signal above the de-esser frequency and above threshold
+        let input = sine_wave(8000.0, sample_rate, n);
+        let input_peak = peak(&input);
+
+        let mut ds = InputDeesserState::default();
+        ds.enabled.store(true, Ordering::Relaxed);
+        ds.threshold_linear = 0.05; // low threshold so the signal triggers reduction
+        ds.hpf_coeffs = BiquadCoeffs::high_pass(6000.0, 0.7, sample_rate);
+
+        let mut output = input.clone();
+        apply_deesser(&mut ds, 0, output.as_mut_ptr(), n as u32);
+
+        let output_peak = peak(&output);
+        assert!(
+            output_peak < input_peak,
+            "de-esser should reduce high-freq peaks: output_peak={output_peak} input_peak={input_peak}"
+        );
+    }
+
+    #[test]
+    fn compressor_reduces_peaks() {
+        let sample_rate = 48000.0;
+        let n = 48000; // 1 second of audio to let the envelope settle
+        // Loud signal above -18dB threshold (default threshold_linear ~ 0.125)
+        let input: Vec<f32> = sine_wave(440.0, sample_rate, n)
+            .iter()
+            .map(|x| x * 0.8) // ~-2dB, well above threshold
+            .collect();
+
+        let mut comp = OutputCompressorState::default();
+        comp.enabled.store(true, Ordering::Relaxed);
+        comp.threshold_linear = 0.125; // ~-18dB
+        comp.makeup_gain = 1.0;
+
+        let mut output = input.clone();
+        apply_compressor(&mut comp, 0, output.as_mut_ptr(), n as u32);
+
+        // Check the tail portion where the envelope has settled
+        let tail_start = n / 2;
+        let input_tail_peak = peak(&input[tail_start..]);
+        let output_tail_peak = peak(&output[tail_start..]);
+        assert!(
+            output_tail_peak < input_tail_peak,
+            "compressor should reduce peaks after settling: output_peak={output_tail_peak} input_peak={input_tail_peak}"
+        );
+    }
+
+    #[test]
+    fn disabled_eq_is_bitwise_noop() {
+        let mut eq = InputEqState::default();
+        eq.enabled.store(false, Ordering::Relaxed);
+        let original = sine_wave(1000.0, 48000.0, 256);
+        let mut processed = original.clone();
+        apply_eq(&mut eq, 0, processed.as_mut_ptr(), 256);
+        assert_eq!(
+            original, processed,
+            "disabled EQ should not modify the buffer"
+        );
+    }
+
+    #[test]
+    fn disabled_gate_is_bitwise_noop() {
+        let mut gate = InputGateState::default();
+        gate.enabled.store(false, Ordering::Relaxed);
+        let original = sine_wave(440.0, 48000.0, 256);
+        let mut processed = original.clone();
+        apply_gate(&mut gate, 0, processed.as_mut_ptr(), 256);
+        assert_eq!(
+            original, processed,
+            "disabled gate should not modify the buffer"
+        );
+    }
+
+    #[test]
+    fn disabled_compressor_is_bitwise_noop() {
+        let mut comp = OutputCompressorState::default();
+        comp.enabled.store(false, Ordering::Relaxed);
+        let original = sine_wave(440.0, 48000.0, 256);
+        let mut processed = original.clone();
+        apply_compressor(&mut comp, 0, processed.as_mut_ptr(), 256);
+        assert_eq!(
+            original, processed,
+            "disabled compressor should not modify the buffer"
+        );
+    }
+
+    #[test]
+    fn time_constant_sanity() {
+        // Typical values: attack 1-50ms, release 10-500ms at 48kHz
+        for &ms in &[1.0, 5.0, 10.0, 50.0, 100.0, 500.0] {
+            let c = time_constant(ms, 48000.0);
+            assert!(
+                c > 0.0 && c < 1.0,
+                "time_constant({ms}ms) = {c}, expected in (0, 1)"
+            );
+        }
+    }
+
+    #[test]
+    fn low_shelf_boosts_bass() {
+        let sample_rate = 48000.0;
+        let n = 4096;
+
+        // Low shelf at 200Hz with +6dB gain
+        let coeffs = BiquadCoeffs::low_shelf(200.0, 6.0, 0.7, sample_rate);
+
+        // Process a low-frequency signal (100Hz)
+        let low_input = sine_wave(100.0, sample_rate, n);
+        let mut low_output = low_input.clone();
+        let mut low_state = BiquadState::default();
+        for s in &mut low_output {
+            *s = low_state.process(&coeffs, *s);
+        }
+        // Skip transient
+        let low_rms = rms(&low_output[512..]);
+
+        // Process a high-frequency signal (4000Hz)
+        let high_input = sine_wave(4000.0, sample_rate, n);
+        let mut high_output = high_input.clone();
+        let mut high_state = BiquadState::default();
+        for s in &mut high_output {
+            *s = high_state.process(&coeffs, *s);
+        }
+        let high_rms = rms(&high_output[512..]);
+
+        assert!(
+            low_rms > high_rms,
+            "low shelf should boost bass more than treble: low_rms={low_rms} high_rms={high_rms}"
+        );
     }
 }

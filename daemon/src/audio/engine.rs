@@ -31,6 +31,10 @@ const SPA_PROP_MONITOR_VOLUMES: u32 = 0x10001;
 /// Minimum interval between level updates per node (~20Hz)
 const LEVEL_THROTTLE_MS: u128 = 50;
 
+/// Default sample rate used for DSP calculations.
+// TODO: read actual rate from PipeWire position callback when available
+const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
+
 pub struct PwEngine {
     thread_handle: thread::JoinHandle<()>,
 }
@@ -199,7 +203,7 @@ fn run_pw_loop(
         _metadata_listener: None,
         deferred_default_input: config.default_input_id,
         routing_ready: false,
-        deferred_stream_moves: Vec::new(),
+        deferred_stream_moves: HashMap::new(),
         routing_wait_start: None,
         known_stream_ids: HashSet::new(),
         known_capture_ids: HashSet::new(),
@@ -379,7 +383,8 @@ struct PwState {
     /// Prevents yanking streams off hardware sinks before the mixer chain is ready.
     routing_ready: bool,
     /// Streams waiting to be routed once routing_ready becomes true.
-    deferred_stream_moves: Vec<(u32, u32)>,
+    /// HashMap deduplicates by pw_node_id so rapid MoveStream commands don't accumulate.
+    deferred_stream_moves: HashMap<u32, u32>,
     /// When we started waiting for routing readiness (for timeout).
     routing_wait_start: Option<Instant>,
     known_stream_ids: HashSet<u32>,
@@ -1010,7 +1015,7 @@ fn handle_command(
             let mut s = state.borrow_mut();
             if !s.routing_ready {
                 debug!("deferring stream {pw_node_id} routing until output chain ready");
-                s.deferred_stream_moves.push((pw_node_id, input_id));
+                s.deferred_stream_moves.insert(pw_node_id, input_id);
             } else {
                 drop(s);
                 execute_move_stream(state, pw_node_id, input_id);
@@ -1084,7 +1089,7 @@ fn handle_command(
                         "bypass" => super::dsp::EqBandType::Bypass,
                         _ => super::dsp::EqBandType::Peaking,
                     };
-                    mixer.set_input_eq_band(iidx, band as usize, bt, freq as f32, gain_db as f32, q as f32, 48000.0);
+                    mixer.set_input_eq_band(iidx, band as usize, bt, freq as f32, gain_db as f32, q as f32, DEFAULT_SAMPLE_RATE);
                 }
             }
         }
@@ -1111,7 +1116,7 @@ fn handle_command(
             let s = state.borrow();
             if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
                 if let Some(ref mixer) = s.mixer {
-                    mixer.set_input_gate(iidx, threshold_db, attack_ms, release_ms, hold_ms, 48000.0);
+                    mixer.set_input_gate(iidx, threshold_db, attack_ms, release_ms, hold_ms, DEFAULT_SAMPLE_RATE);
                 }
             }
         }
@@ -1129,7 +1134,7 @@ fn handle_command(
             let s = state.borrow();
             if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
                 if let Some(ref mixer) = s.mixer {
-                    mixer.set_input_deesser(iidx, frequency as f32, threshold_db, ratio, 48000.0);
+                    mixer.set_input_deesser(iidx, frequency as f32, threshold_db, ratio, DEFAULT_SAMPLE_RATE);
                 }
             }
         }
@@ -1147,7 +1152,7 @@ fn handle_command(
             let s = state.borrow();
             if let Some(&oidx) = s.output_id_to_idx.get(&output_id) {
                 if let Some(ref mixer) = s.mixer {
-                    mixer.set_output_compressor(oidx, threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, knee_db, 48000.0);
+                    mixer.set_output_compressor(oidx, threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, knee_db, DEFAULT_SAMPLE_RATE);
                 }
             }
         }
@@ -1165,7 +1170,7 @@ fn handle_command(
             let s = state.borrow();
             if let Some(&oidx) = s.output_id_to_idx.get(&output_id) {
                 if let Some(ref mixer) = s.mixer {
-                    mixer.set_output_limiter(oidx, ceiling_db, release_ms, 48000.0);
+                    mixer.set_output_limiter(oidx, ceiling_db, release_ms, DEFAULT_SAMPLE_RATE);
                 }
             }
         }

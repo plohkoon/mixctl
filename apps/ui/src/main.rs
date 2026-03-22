@@ -1,4 +1,5 @@
 mod dbus;
+mod eq_curve;
 
 slint::include_modules!();
 
@@ -23,6 +24,7 @@ pub(crate) enum UserAction {
     OpenRulesDialog,
     OpenCaptureDialog,
     OpenBeacnDialog,
+    OpenDspDialog,
 }
 
 fn main() {
@@ -112,5 +114,10 @@ fn wire_callbacks(window: &MainWindow, action_tx: &Arc<mpsc::UnboundedSender<Use
     let tx = action_tx.clone();
     mixer.on_open_beacn_dialog(move || {
         tx.send(UserAction::OpenBeacnDialog).ok();
+    });
+
+    let tx = action_tx.clone();
+    mixer.on_open_dsp_dialog(move || {
+        tx.send(UserAction::OpenDspDialog).ok();
     });
 }

@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Gauge};
 
-use super::parse_color;
+use super::find_input_display;
 use crate::app::{AppState, Panel};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -40,12 +40,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         }
 
         // Find the input name and color for this route
-        let (input_name, input_color) = state
-            .inputs
-            .iter()
-            .find(|inp| inp.id == route.input_id)
-            .map(|inp| (inp.name.as_str(), parse_color(&inp.color)))
-            .unwrap_or(("?", Color::Gray));
+        let (input_name, input_color) = find_input_display(&state.inputs, route.input_id);
 
         let is_selected = is_active && i == state.route_cursor;
         let cursor = if is_selected { "▸ " } else { "  " };

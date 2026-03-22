@@ -111,6 +111,97 @@ pub struct LimiterInfo {
     pub release_ms: f64,
 }
 
+// ---------------------------------------------------------------------------
+// EQ frequency response computation (shared between UIs)
+// ---------------------------------------------------------------------------
+
+/// Number of points for EQ frequency response curves.
+pub const EQ_CURVE_POINTS: usize = 150;
+
+/// Compute the combined EQ frequency response from band info.
+/// Returns (frequency_hz, magnitude_db) pairs on a log scale, 20Hz–20kHz.
+pub fn compute_eq_curve(bands: &[EqBandInfo]) -> Vec<(f64, f64)> {
+    let sample_rate = 48000.0_f64;
+    let log_min = 20.0_f64.ln();
+    let log_max = 20000.0_f64.ln();
+
+    (0..EQ_CURVE_POINTS)
+        .map(|i| {
+            let t = i as f64 / (EQ_CURVE_POINTS - 1) as f64;
+            let freq = (log_min + t * (log_max - log_min)).exp();
+            let w = 2.0 * std::f64::consts::PI * freq / sample_rate;
+            let (sin_w, cos_w) = w.sin_cos();
+            let (sin_2w, cos_2w) = (2.0 * w).sin_cos();
+
+            let mut total_db = 0.0_f64;
+            for band in bands {
+                let coeffs = eq_band_coeffs(
+                    &band.band_type,
+                    band.frequency as f32,
+                    band.gain_db as f32,
+                    band.q as f32,
+                    sample_rate as f32,
+                );
+                // H(z) magnitude at z = e^(jw)
+                let num_re = coeffs.0 + coeffs.1 * cos_w as f32 + coeffs.2 * cos_2w as f32;
+                let num_im = -(coeffs.1 * sin_w as f32 + coeffs.2 * sin_2w as f32);
+                let den_re = 1.0 + coeffs.3 * cos_w as f32 + coeffs.4 * cos_2w as f32;
+                let den_im = -(coeffs.3 * sin_w as f32 + coeffs.4 * sin_2w as f32);
+                let num_sq = num_re * num_re + num_im * num_im;
+                let den_sq = den_re * den_re + den_im * den_im;
+                if den_sq > 1e-20 {
+                    total_db += 10.0 * (num_sq / den_sq).log10() as f64;
+                }
+            }
+            (freq, total_db.clamp(-30.0, 30.0))
+        })
+        .collect()
+}
+
+/// Compute biquad coefficients (b0, b1, b2, a1, a2) for an EQ band.
+fn eq_band_coeffs(band_type: &str, freq: f32, gain_db: f32, q: f32, sr: f32) -> (f32, f32, f32, f32, f32) {
+    let a = 10.0_f32.powf(gain_db / 40.0);
+    let w0 = 2.0 * std::f32::consts::PI * freq / sr;
+    let (sin_w0, cos_w0) = w0.sin_cos();
+    let alpha = sin_w0 / (2.0 * q);
+
+    match band_type {
+        "low_shelf" => {
+            let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+            let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+            (
+                (a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha)) / a0,
+                (2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0)) / a0,
+                (a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha)) / a0,
+                (-2.0 * ((a - 1.0) + (a + 1.0) * cos_w0)) / a0,
+                ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha) / a0,
+            )
+        }
+        "high_shelf" => {
+            let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+            let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+            (
+                (a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha)) / a0,
+                (-2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0)) / a0,
+                (a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha)) / a0,
+                (2.0 * ((a - 1.0) - (a + 1.0) * cos_w0)) / a0,
+                ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha) / a0,
+            )
+        }
+        _ => {
+            // Peaking (default)
+            let a0 = 1.0 + alpha / a;
+            (
+                (1.0 + alpha * a) / a0,
+                (-2.0 * cos_w0) / a0,
+                (1.0 - alpha * a) / a0,
+                (-2.0 * cos_w0) / a0,
+                (1.0 - alpha / a) / a0,
+            )
+        }
+    }
+}
+
 /// Parse a "#RRGGBB" hex color string into (R, G, B) components.
 pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     let s = s.strip_prefix('#')?;

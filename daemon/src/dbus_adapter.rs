@@ -1752,6 +1752,7 @@ impl Service {
         Self::component_changed(emitter).await
     }
 
+    #[allow(dead_code)]
     pub async fn emit_input_dsp_changed(
         emitter: &SignalEmitter<'_>,
         input_id: u32,
@@ -1759,6 +1760,7 @@ impl Service {
         Self::input_dsp_changed(emitter, input_id).await
     }
 
+    #[allow(dead_code)]
     pub async fn emit_output_dsp_changed(
         emitter: &SignalEmitter<'_>,
         output_id: u32,

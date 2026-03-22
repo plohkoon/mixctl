@@ -278,7 +278,7 @@ fn handle_buttons(
             ButtonAction::ToggleRouteMute => slot_toggle_route_mute(state, slot, current_output_id),
             ButtonAction::ToggleGlobalMute => slot_toggle_global_mute(state, slot),
             ButtonAction::NextOutput => Some(DeviceEvent::NextOutput),
-            ButtonAction::PrevOutput => Some(DeviceEvent::NextOutput), // TODO: add PrevOutput event
+            ButtonAction::PrevOutput => Some(DeviceEvent::PrevOutput),
             ButtonAction::PageLeft => Some(DeviceEvent::PageLeft),
             ButtonAction::PageRight => Some(DeviceEvent::PageRight),
             ButtonAction::None => None,
@@ -467,4 +467,184 @@ fn update_leds(dev: &Device, state: &DisplayState) -> anyhow::Result<()> {
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mixctl_beacn_display::{DisplayState, OutputTab, SlotView};
+    use mixctl_core::config_sections::{ButtonAction, ButtonMappings};
+
+    fn test_display_state() -> DisplayState {
+        DisplayState {
+            current_output_index: 0,
+            outputs: vec![
+                OutputTab {
+                    id: 1,
+                    name: "Personal".into(),
+                    color: (142, 68, 173),
+                    is_current: true,
+                },
+                OutputTab {
+                    id: 2,
+                    name: "Stream".into(),
+                    color: (52, 152, 219),
+                    is_current: false,
+                },
+            ],
+            visible_inputs: [
+                Some(SlotView {
+                    input_id: 10,
+                    name: "System".into(),
+                    color: (74, 144, 217),
+                    volume: 80,
+                    route_muted: false,
+                    global_muted: false,
+                    level: None,
+                    streams: vec![],
+                }),
+                Some(SlotView {
+                    input_id: 11,
+                    name: "Game".into(),
+                    color: (231, 76, 60),
+                    volume: 60,
+                    route_muted: false,
+                    global_muted: false,
+                    level: None,
+                    streams: vec![],
+                }),
+                Some(SlotView {
+                    input_id: 12,
+                    name: "Music".into(),
+                    color: (46, 204, 113),
+                    volume: 100,
+                    route_muted: false,
+                    global_muted: false,
+                    level: None,
+                    streams: vec![],
+                }),
+                Some(SlotView {
+                    input_id: 13,
+                    name: "Chat".into(),
+                    color: (243, 156, 18),
+                    volume: 50,
+                    route_muted: false,
+                    global_muted: false,
+                    level: None,
+                    streams: vec![],
+                }),
+            ],
+            page: 0,
+            total_pages: 2,
+        }
+    }
+
+    #[test]
+    fn dial_press_sends_route_mute() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Some(test_display_state());
+        let mappings = ButtonMappings::default();
+
+        handle_buttons(&tx, &[Button::Dial1], &state, &mappings);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            DeviceEvent::ToggleRouteMute { input_id, output_id } => {
+                assert_eq!(input_id, 10); // slot 0 input
+                assert_eq!(output_id, 1);  // current output
+            }
+            other => panic!("expected ToggleRouteMute, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn audience_press_sends_global_mute() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Some(test_display_state());
+        let mappings = ButtonMappings::default();
+
+        handle_buttons(&tx, &[Button::Audience1], &state, &mappings);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            DeviceEvent::ToggleGlobalMute { input_id } => {
+                assert_eq!(input_id, 10); // slot 0 input
+            }
+            other => panic!("expected ToggleGlobalMute, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mix_button_sends_next_output() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Some(test_display_state());
+        let mappings = ButtonMappings::default();
+
+        handle_buttons(&tx, &[Button::AudienceMix], &state, &mappings);
+
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::NextOutput));
+    }
+
+    #[test]
+    fn page_buttons_send_page_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Some(test_display_state());
+        let mappings = ButtonMappings::default();
+
+        handle_buttons(&tx, &[Button::PageLeft], &state, &mappings);
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::PageLeft));
+
+        handle_buttons(&tx, &[Button::PageRight], &state, &mappings);
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::PageRight));
+    }
+
+    #[test]
+    fn prev_output_sends_prev_output() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Some(test_display_state());
+        let mut mappings = ButtonMappings::default();
+        mappings.mix = ButtonAction::PrevOutput;
+
+        handle_buttons(&tx, &[Button::AudienceMix], &state, &mappings);
+
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::PrevOutput));
+    }
+
+    #[test]
+    fn dial_rotation_sends_volume_adjust() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Some(test_display_state());
+        let dials: [i8; 4] = [3, 0, 0, -2];
+
+        handle_dials(&tx, &dials, &state);
+
+        // Dial 0 with delta 3
+        let event = rx.try_recv().unwrap();
+        match event {
+            DeviceEvent::AdjustRouteVolume { input_id, output_id, delta } => {
+                assert_eq!(input_id, 10);
+                assert_eq!(output_id, 1);
+                assert_eq!(delta, 3);
+            }
+            other => panic!("expected AdjustRouteVolume, got {:?}", other),
+        }
+
+        // Dial 3 with delta -2
+        let event = rx.try_recv().unwrap();
+        match event {
+            DeviceEvent::AdjustRouteVolume { input_id, output_id, delta } => {
+                assert_eq!(input_id, 13);
+                assert_eq!(output_id, 1);
+                assert_eq!(delta, -2);
+            }
+            other => panic!("expected AdjustRouteVolume, got {:?}", other),
+        }
+
+        // No more events (dials 1 and 2 were 0)
+        assert!(rx.try_recv().is_err());
+    }
 }

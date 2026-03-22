@@ -66,9 +66,15 @@ impl BeacnState {
 
     /// Refresh all state from the mixer daemon via D-Bus.
     pub async fn refresh_from_dbus(&mut self, proxy: &MixCtlProxy<'_>) -> anyhow::Result<()> {
-        let inputs = proxy.list_inputs().await?;
-        let outputs = proxy.list_outputs().await?;
-        let page = proxy.get_current_page().await?;
+        // Fetch inputs, outputs, and page concurrently to reduce round-trips
+        let (inputs_res, outputs_res, page_res) = tokio::join!(
+            proxy.list_inputs(),
+            proxy.list_outputs(),
+            proxy.get_current_page(),
+        );
+        let inputs = inputs_res?;
+        let outputs = outputs_res?;
+        let page = page_res?;
 
         self.inputs = inputs
             .iter()
@@ -190,6 +196,16 @@ impl BeacnState {
         }
     }
 
+    pub fn prev_output(&mut self) {
+        if !self.outputs.is_empty() {
+            if self.current_output_index == 0 {
+                self.current_output_index = self.outputs.len() - 1;
+            } else {
+                self.current_output_index -= 1;
+            }
+        }
+    }
+
     pub fn build_snapshot(&self) -> DisplayState {
         let outputs: Vec<OutputTab> = self
             .outputs
@@ -259,5 +275,144 @@ impl BeacnState {
             page: self.current_page,
             total_pages: self.max_page() + 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_inputs(n: usize) -> Vec<InputEntry> {
+        (0..n)
+            .map(|i| InputEntry {
+                id: (i + 1) as u32,
+                name: format!("Input{}", i + 1),
+                color: (100, 100, 100),
+            })
+            .collect()
+    }
+
+    fn make_outputs(n: usize) -> Vec<OutputEntry> {
+        (0..n)
+            .map(|i| OutputEntry {
+                id: (100 + i) as u32,
+                name: format!("Output{}", i + 1),
+                color: (200, 200, 200),
+            })
+            .collect()
+    }
+
+    fn make_state_with(n_inputs: usize, n_outputs: usize) -> BeacnState {
+        let inputs = make_inputs(n_inputs);
+        let outputs = make_outputs(n_outputs);
+        let mut routes = HashMap::new();
+        for inp in &inputs {
+            for out in &outputs {
+                routes.insert(
+                    route_key(inp.id, out.id),
+                    RouteEntry { volume: 100, muted: false },
+                );
+            }
+        }
+        BeacnState {
+            inputs,
+            outputs,
+            routes,
+            current_output_index: 0,
+            current_page: 0,
+            streams_by_input: HashMap::new(),
+            input_levels: HashMap::new(),
+            levels_enabled: false,
+            dial_sensitivity: 2,
+            level_decay: 0.8,
+        }
+    }
+
+    #[test]
+    fn build_snapshot_empty() {
+        let state = make_state_with(0, 0);
+        let snap = state.build_snapshot();
+        assert!(snap.outputs.is_empty());
+        assert!(snap.visible_inputs.iter().all(|v| v.is_none()));
+        assert_eq!(snap.total_pages, 1); // max_page(0) = 0, +1 = 1
+    }
+
+    #[test]
+    fn build_snapshot_4_inputs() {
+        let state = make_state_with(4, 1);
+        let snap = state.build_snapshot();
+        assert_eq!(snap.visible_inputs.iter().filter(|v| v.is_some()).count(), 4);
+        assert_eq!(snap.visible_inputs[0].as_ref().unwrap().input_id, 1);
+        assert_eq!(snap.visible_inputs[3].as_ref().unwrap().input_id, 4);
+    }
+
+    #[test]
+    fn build_snapshot_pagination() {
+        let mut state = make_state_with(8, 1);
+        state.current_page = 1;
+        let snap = state.build_snapshot();
+        // Page 1 should show inputs 5-8
+        assert_eq!(snap.visible_inputs.iter().filter(|v| v.is_some()).count(), 4);
+        assert_eq!(snap.visible_inputs[0].as_ref().unwrap().input_id, 5);
+        assert_eq!(snap.visible_inputs[3].as_ref().unwrap().input_id, 8);
+    }
+
+    #[test]
+    fn next_output_wraps() {
+        let mut state = make_state_with(1, 3);
+        assert_eq!(state.current_output_index, 0);
+        state.next_output();
+        assert_eq!(state.current_output_index, 1);
+        state.next_output();
+        assert_eq!(state.current_output_index, 2);
+        state.next_output();
+        assert_eq!(state.current_output_index, 0); // wraps
+        state.next_output();
+        assert_eq!(state.current_output_index, 1);
+    }
+
+    #[test]
+    fn prev_output_wraps() {
+        let mut state = make_state_with(1, 3);
+        assert_eq!(state.current_output_index, 0);
+        state.prev_output();
+        assert_eq!(state.current_output_index, 2); // wraps to last
+        state.prev_output();
+        assert_eq!(state.current_output_index, 1);
+    }
+
+    #[test]
+    fn is_globally_muted() {
+        let mut state = make_state_with(2, 3);
+        // Not globally muted initially (all routes unmuted)
+        assert!(!state.is_globally_muted(1));
+
+        // Mute input 1 on all outputs
+        for out in &state.outputs.clone() {
+            state.set_route_muted(1, out.id, true);
+        }
+        assert!(state.is_globally_muted(1));
+        // Input 2 is still not globally muted
+        assert!(!state.is_globally_muted(2));
+
+        // Unmute one route for input 1 -> no longer globally muted
+        let first_output_id = state.outputs[0].id;
+        state.set_route_muted(1, first_output_id, false);
+        assert!(!state.is_globally_muted(1));
+    }
+
+    #[test]
+    fn max_page_calculation() {
+        let mut state = make_state_with(0, 1);
+        assert_eq!(state.max_page(), 0); // 0 inputs -> 0
+
+        state.inputs = make_inputs(4);
+        assert_eq!(state.max_page(), 0); // 4 inputs -> (4-1)/4 = 0
+
+        state.inputs = make_inputs(5);
+        assert_eq!(state.max_page(), 1); // 5 inputs -> (5-1)/4 = 1
+
+        state.inputs = make_inputs(8);
+        assert_eq!(state.max_page(), 1); // 8 inputs -> (8-1)/4 = 1
     }
 }

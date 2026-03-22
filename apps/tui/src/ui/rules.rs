@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem};
 
-use super::parse_color;
+use super::find_input_display;
 use crate::app::{AppState, Panel};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -30,18 +30,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         .iter()
         .enumerate()
         .map(|(i, rule)| {
-            let input_name = state
-                .inputs
-                .iter()
-                .find(|inp| inp.id == rule.input_id)
-                .map(|inp| inp.name.as_str())
-                .unwrap_or("?");
-            let input_color = state
-                .inputs
-                .iter()
-                .find(|inp| inp.id == rule.input_id)
-                .map(|inp| parse_color(&inp.color))
-                .unwrap_or(Color::Gray);
+            let (input_name, input_color) = find_input_display(&state.inputs, rule.input_id);
 
             let is_selected = is_active && i == state.rule_cursor;
             let cursor = if is_selected { "\u{25b8} " } else { "  " };

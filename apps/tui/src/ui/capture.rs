@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem};
 
-use super::parse_color;
+use super::find_input_display;
 use crate::app::{AppState, Panel};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -34,18 +34,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             let cursor = if is_selected { "\u{25b8} " } else { "  " };
 
             let bound_spans = if device.input_id > 0 {
-                let input_name = state
-                    .inputs
-                    .iter()
-                    .find(|inp| inp.id == device.input_id)
-                    .map(|inp| inp.name.as_str())
-                    .unwrap_or("?");
-                let input_color = state
-                    .inputs
-                    .iter()
-                    .find(|inp| inp.id == device.input_id)
-                    .map(|inp| parse_color(&inp.color))
-                    .unwrap_or(Color::Gray);
+                let (input_name, input_color) = find_input_display(&state.inputs, device.input_id);
                 vec![
                     Span::raw(" \u{2192} "),
                     Span::styled(input_name, Style::default().fg(input_color)),

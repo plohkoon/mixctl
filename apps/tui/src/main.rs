@@ -92,7 +92,6 @@ async fn try_connect_and_run(
 ) -> Result<()> {
     let (proxy, mut state) = dbus::connect_and_load().await?;
     let mut signal_rx = dbus::subscribe_signals(&proxy).await?;
-    let mut tick = tokio::time::interval(Duration::from_millis(50));
     let mut ping_interval = tokio::time::interval(Duration::from_secs(3));
     ping_interval.tick().await; // skip first immediate tick
 
@@ -124,7 +123,6 @@ async fn try_connect_and_run(
                     return Err(anyhow::anyhow!("daemon disconnected"));
                 }
             }
-            _ = tick.tick() => {}
         }
     }
 }

@@ -1,4 +1,5 @@
 mod capture;
+mod dsp;
 mod routes;
 mod rules;
 mod settings;
@@ -50,6 +51,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             crate::app::Panel::Rules => rules::render(frame, left_chunks[0], state),
             crate::app::Panel::Capture => capture::render(frame, left_chunks[0], state),
             crate::app::Panel::Settings => settings::render(frame, left_chunks[0], state),
+            crate::app::Panel::Dsp => dsp::render(frame, left_chunks[0], state),
             _ => routes::render(frame, left_chunks[0], state),
         }
         render_output_master(frame, left_chunks[1], state);
@@ -63,6 +65,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             crate::app::Panel::Rules => rules::render(frame, chunks[1], state),
             crate::app::Panel::Capture => capture::render(frame, chunks[1], state),
             crate::app::Panel::Settings => settings::render(frame, chunks[1], state),
+            crate::app::Panel::Dsp => dsp::render(frame, chunks[1], state),
         }
     }
 
@@ -147,4 +150,13 @@ pub fn parse_color(hex: &str) -> Color {
     } else {
         Color::Gray
     }
+}
+
+/// Look up an input's display name and colour in a single scan.
+pub(crate) fn find_input_display(inputs: &[mixctl_core::InputInfo], id: u32) -> (&str, Color) {
+    inputs
+        .iter()
+        .find(|inp| inp.id == id)
+        .map(|inp| (inp.name.as_str(), parse_color(&inp.color)))
+        .unwrap_or(("?", Color::Gray))
 }

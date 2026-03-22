@@ -11,6 +11,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         Panel::Rules => "Rules",
         Panel::Capture => "Capture",
         Panel::Settings => "Settings",
+        Panel::Dsp => "DSP",
     };
 
     let line = Line::from(vec![

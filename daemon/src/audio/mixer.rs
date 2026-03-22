@@ -386,6 +386,7 @@ impl MixerFilter {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_input_eq(
         &self,
         idx: usize,
@@ -462,6 +463,7 @@ impl MixerFilter {
         cb.dsp.input_deesser[idx].threshold_linear =
             super::dsp::db_to_linear(threshold_db);
         cb.dsp.input_deesser[idx].ratio = ratio as f32;
+        cb.dsp.input_deesser[idx].ratio_exponent = (1.0 / ratio as f32) - 1.0;
         cb.dsp.input_deesser[idx].hpf_coeffs =
             super::dsp::BiquadCoeffs::high_pass(freq, 0.7, sample_rate);
         // Reset filter state
@@ -486,7 +488,7 @@ impl MixerFilter {
         attack_ms: f64,
         release_ms: f64,
         makeup_gain_db: f64,
-        knee_db: f64,
+        _knee_db: f64,
         sample_rate: f32,
     ) {
         let cb = unsafe { &mut *self.callback_data };
@@ -496,14 +498,13 @@ impl MixerFilter {
         cb.dsp.output_compressor[idx].threshold_linear =
             super::dsp::db_to_linear(threshold_db);
         cb.dsp.output_compressor[idx].ratio = ratio as f32;
+        cb.dsp.output_compressor[idx].ratio_exponent = (1.0 / ratio as f32) - 1.0;
         cb.dsp.output_compressor[idx].attack_coeff =
             super::dsp::time_constant(attack_ms, sample_rate);
         cb.dsp.output_compressor[idx].release_coeff =
             super::dsp::time_constant(release_ms, sample_rate);
         cb.dsp.output_compressor[idx].makeup_gain =
             super::dsp::db_to_linear(makeup_gain_db);
-        cb.dsp.output_compressor[idx].knee_width =
-            super::dsp::db_to_linear(knee_db);
     }
 
     pub fn set_output_limiter_enabled(&self, idx: usize, enabled: bool) {

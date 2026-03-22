@@ -425,4 +425,84 @@ mod tests {
         assert_eq!(shared.match_app_rule("firewall"), Some(2));
         assert_eq!(shared.match_app_rule("chrome"), None);
     }
+
+    #[test]
+    fn persist_stream_assignments_creates_rules() {
+        let mut shared = make_shared_for_rules(vec![]);
+        shared.active_streams.insert(100, StreamState {
+            app_name: "spotify".into(),
+            media_name: "Music".into(),
+            input_id: 1,
+        });
+        shared.active_streams.insert(101, StreamState {
+            app_name: "discord".into(),
+            media_name: "Voice".into(),
+            input_id: 1,
+        });
+
+        shared.persist_stream_assignments();
+
+        assert_eq!(shared.config.app_rules.len(), 2);
+        assert!(shared.config.app_rules.iter().any(|r| r.app_name == "spotify" && r.input_id == 1));
+        assert!(shared.config.app_rules.iter().any(|r| r.app_name == "discord" && r.input_id == 1));
+        assert!(shared.config_dirty);
+    }
+
+    #[test]
+    fn persist_stream_assignments_no_duplicates() {
+        let mut shared = make_shared_for_rules(vec![AppRule {
+            app_name: "spotify".into(),
+            input_id: 1,
+        }]);
+        shared.active_streams.insert(100, StreamState {
+            app_name: "spotify".into(),
+            media_name: "Music".into(),
+            input_id: 1,
+        });
+
+        shared.persist_stream_assignments();
+
+        // Should not add a duplicate rule
+        let spotify_rules: Vec<_> = shared.config.app_rules.iter()
+            .filter(|r| r.app_name == "spotify")
+            .collect();
+        assert_eq!(spotify_rules.len(), 1);
+    }
+
+    #[test]
+    fn build_input_info_correct() {
+        let cfg = ChannelConfig {
+            id: Some(42),
+            name: "TestInput".into(),
+            color: "#AABBCC".into(),
+            target_device: None,
+            capture_device: None,
+        };
+        let info = Service::build_input_info(&cfg);
+        assert_eq!(info.id, 42);
+        assert_eq!(info.name, "TestInput");
+        assert_eq!(info.color, "#AABBCC");
+    }
+
+    #[test]
+    fn build_output_info_correct() {
+        let cfg = ChannelConfig {
+            id: Some(7),
+            name: "MainMix".into(),
+            color: "#112233".into(),
+            target_device: Some("alsa_output.usb".into()),
+            capture_device: None,
+        };
+        let state = crate::state::OutputState {
+            volume: 75,
+            muted: true,
+        };
+        let info = Service::build_output_info(&cfg, &state);
+        assert_eq!(info.id, 7);
+        assert_eq!(info.name, "MainMix");
+        assert_eq!(info.color, "#112233");
+        assert_eq!(info.volume, 75);
+        assert!(info.muted);
+        assert_eq!(info.target_device, "alsa_output.usb");
+    }
 }

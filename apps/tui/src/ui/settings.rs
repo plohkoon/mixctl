@@ -81,6 +81,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // BEACN section
     if state.beacn_connected {
+        let beacn = state.beacn_config.as_ref();
         items.push(ListItem::new(Line::from("")));
         items.push(ListItem::new(Line::from(Span::styled(
             "BEACN Device (connected):",
@@ -88,19 +89,31 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         ))));
         items.push(ListItem::new(Line::from(vec![
             Span::raw("  Layout: "),
-            Span::styled("dial", Style::default().fg(Color::Gray)),
+            Span::styled(
+                beacn.map(|c| c.layout.as_str()).unwrap_or("?"),
+                Style::default().fg(Color::Gray),
+            ),
         ])));
         items.push(ListItem::new(Line::from(vec![
             Span::raw("  Dial sensitivity: "),
-            Span::styled("2", Style::default().fg(Color::Gray)),
+            Span::styled(
+                beacn.map(|c| c.dial_sensitivity.to_string()).unwrap_or_else(|| "?".into()),
+                Style::default().fg(Color::Gray),
+            ),
         ])));
         items.push(ListItem::new(Line::from(vec![
             Span::raw("  Display brightness: "),
-            Span::styled("40", Style::default().fg(Color::Gray)),
+            Span::styled(
+                beacn.map(|c| c.display_brightness.to_string()).unwrap_or_else(|| "?".into()),
+                Style::default().fg(Color::Gray),
+            ),
         ])));
         items.push(ListItem::new(Line::from(vec![
             Span::raw("  LED brightness: "),
-            Span::styled("255", Style::default().fg(Color::Gray)),
+            Span::styled(
+                beacn.map(|c| c.led_brightness.to_string()).unwrap_or_else(|| "?".into()),
+                Style::default().fg(Color::Gray),
+            ),
         ])));
     }
 

@@ -190,3 +190,77 @@ fn default_color_output() -> bool {
 fn default_output_format() -> String {
     "text".into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn beacn_config_defaults() {
+        let config = BeacnConfig::default();
+        assert_eq!(config.layout, "column");
+        assert_eq!(config.dial_sensitivity, 2);
+        assert_eq!(config.level_decay, 0.8);
+        assert_eq!(config.display_brightness, 40);
+        assert_eq!(config.led_brightness, 255);
+    }
+
+    #[test]
+    fn button_mappings_default() {
+        let m = ButtonMappings::default();
+        assert_eq!(m.dial1_press, ButtonAction::ToggleRouteMute);
+        assert_eq!(m.dial2_press, ButtonAction::ToggleRouteMute);
+        assert_eq!(m.dial3_press, ButtonAction::ToggleRouteMute);
+        assert_eq!(m.dial4_press, ButtonAction::ToggleRouteMute);
+        assert_eq!(m.audience1, ButtonAction::ToggleGlobalMute);
+        assert_eq!(m.audience2, ButtonAction::ToggleGlobalMute);
+        assert_eq!(m.audience3, ButtonAction::ToggleGlobalMute);
+        assert_eq!(m.audience4, ButtonAction::ToggleGlobalMute);
+        assert_eq!(m.mix, ButtonAction::NextOutput);
+        assert_eq!(m.page_left, ButtonAction::PageLeft);
+        assert_eq!(m.page_right, ButtonAction::PageRight);
+    }
+
+    #[test]
+    fn button_action_serde_roundtrip() {
+        let action = ButtonAction::ToggleRouteMute;
+        let json = serde_json::to_string(&action).unwrap();
+        let deserialized: ButtonAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(action, deserialized);
+
+        // Test other variants
+        for variant in &[
+            ButtonAction::ToggleGlobalMute,
+            ButtonAction::NextOutput,
+            ButtonAction::PrevOutput,
+            ButtonAction::PageLeft,
+            ButtonAction::PageRight,
+            ButtonAction::None,
+        ] {
+            let json = serde_json::to_string(variant).unwrap();
+            let deserialized: ButtonAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, deserialized);
+        }
+    }
+
+    #[test]
+    fn beacn_config_serde_roundtrip() {
+        let config = BeacnConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: BeacnConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn partial_beacn_config_deserialize() {
+        let json = r#"{"layout": "row"}"#;
+        let config: BeacnConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.layout, "row");
+        // Missing fields get defaults
+        assert_eq!(config.dial_sensitivity, 2);
+        assert_eq!(config.level_decay, 0.8);
+        assert_eq!(config.display_brightness, 40);
+        assert_eq!(config.led_brightness, 255);
+        assert_eq!(config.button_mappings, ButtonMappings::default());
+    }
+}

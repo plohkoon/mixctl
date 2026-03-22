@@ -15,3 +15,4 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 zbus = "5"
 futures-lite = "2"
 anyhow = "1"
+serde_json = "1"

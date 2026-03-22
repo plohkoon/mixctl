@@ -12,61 +12,43 @@ pub fn handle_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         };
     }
 
-    // Panel-specific keys
+    // Panel-specific keys (unique to each panel) — return early if matched,
+    // otherwise fall through to the common handler below.
     match state.active_panel {
-        Panel::Rules => {
-            match key.code {
-                KeyCode::Char('q') => return Some(AppAction::Quit),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Some(AppAction::Quit),
-                KeyCode::Tab => return Some(AppAction::NextPanel),
-                KeyCode::BackTab => return Some(AppAction::PrevPanel),
-                KeyCode::Char('?') => return Some(AppAction::ShowHelp),
-                KeyCode::Char('k') | KeyCode::Up => return Some(AppAction::CursorUp),
-                KeyCode::Char('j') | KeyCode::Down => return Some(AppAction::CursorDown),
-                KeyCode::Char('d') => return Some(AppAction::DeleteRule),
-                KeyCode::Char(c @ '1'..='9') => {
-                    let n = (c as usize) - ('0' as usize);
-                    return Some(AppAction::AssignRuleToInput(n));
-                }
-                _ => return None,
+        Panel::Rules => match key.code {
+            KeyCode::Char('d') => return Some(AppAction::DeleteRule),
+            KeyCode::Char(c @ '1'..='9') => {
+                let n = (c as usize) - ('0' as usize);
+                return Some(AppAction::AssignRuleToInput(n));
             }
-        }
-        Panel::Capture => {
-            match key.code {
-                KeyCode::Char('q') => return Some(AppAction::Quit),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Some(AppAction::Quit),
-                KeyCode::Tab => return Some(AppAction::NextPanel),
-                KeyCode::BackTab => return Some(AppAction::PrevPanel),
-                KeyCode::Char('?') => return Some(AppAction::ShowHelp),
-                KeyCode::Char('k') | KeyCode::Up => return Some(AppAction::CursorUp),
-                KeyCode::Char('j') | KeyCode::Down => return Some(AppAction::CursorDown),
-                KeyCode::Char('u') => return Some(AppAction::UnbindCapture),
-                KeyCode::Char(c @ '1'..='9') => {
-                    let n = (c as usize) - ('0' as usize);
-                    return Some(AppAction::BindCapture(n));
-                }
-                _ => return None,
+            _ => {}
+        },
+        Panel::Capture => match key.code {
+            KeyCode::Char('u') => return Some(AppAction::UnbindCapture),
+            KeyCode::Char(c @ '1'..='9') => {
+                let n = (c as usize) - ('0' as usize);
+                return Some(AppAction::BindCapture(n));
             }
-        }
-        Panel::Settings => {
-            match key.code {
-                KeyCode::Char('q') => return Some(AppAction::Quit),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Some(AppAction::Quit),
-                KeyCode::Tab => return Some(AppAction::NextPanel),
-                KeyCode::BackTab => return Some(AppAction::PrevPanel),
-                KeyCode::Char('?') => return Some(AppAction::ShowHelp),
-                KeyCode::Char('k') | KeyCode::Up => return Some(AppAction::CursorUp),
-                KeyCode::Char('j') | KeyCode::Down => return Some(AppAction::CursorDown),
-                KeyCode::Char('c') => {
-                    if state.settings_cursor < state.inputs.len() {
-                        return Some(AppAction::CycleInputColor);
-                    } else {
-                        return Some(AppAction::CycleOutputColor);
-                    }
+            _ => {}
+        },
+        Panel::Settings => match key.code {
+            KeyCode::Char('c') => {
+                if state.settings_cursor < state.inputs.len() {
+                    return Some(AppAction::CycleInputColor);
+                } else {
+                    return Some(AppAction::CycleOutputColor);
                 }
-                _ => return None,
             }
-        }
+            _ => {}
+        },
+        Panel::Dsp => match key.code {
+            KeyCode::Char('e') => return Some(AppAction::ToggleEq),
+            KeyCode::Char('g') => return Some(AppAction::ToggleGate),
+            KeyCode::Char('d') => return Some(AppAction::ToggleDeesser),
+            KeyCode::Char('c') => return Some(AppAction::ToggleCompressor),
+            KeyCode::Char('l') => return Some(AppAction::ToggleLimiter),
+            _ => {}
+        },
         _ => {}
     }
 
@@ -122,5 +104,166 @@ pub fn handle_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         KeyCode::Char('M') => Some(AppAction::ToggleOutputMute),
 
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use mixctl_core::{InputInfo, OutputInfo, RouteInfo};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[allow(dead_code)]
+    fn key_mod(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    fn test_state_with_panel(panel: Panel) -> AppState {
+        let mut state = AppState::new(
+            vec![InputInfo { id: 1, name: "Sys".into(), color: "#000".into() }],
+            vec![OutputInfo { id: 5, name: "Out".into(), color: "#fff".into(), volume: 100, muted: false, target_device: String::new() }],
+            vec![RouteInfo { input_id: 1, output_id: 5, volume: 80, muted: false }],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            None,
+        );
+        state.active_panel = panel;
+        state
+    }
+
+    #[test]
+    fn q_quits_in_all_panels() {
+        let panels = [
+            Panel::Routes,
+            Panel::Streams,
+            Panel::Outputs,
+            Panel::Rules,
+            Panel::Capture,
+            Panel::Settings,
+            Panel::Dsp,
+        ];
+        for panel in panels {
+            let state = test_state_with_panel(panel);
+            let action = handle_key(key(KeyCode::Char('q')), &state);
+            assert!(
+                matches!(action, Some(AppAction::Quit)),
+                "q should quit in {:?} panel",
+                panel
+            );
+        }
+    }
+
+    #[test]
+    fn tab_cycles_panel() {
+        let state = test_state_with_panel(Panel::Routes);
+        let action = handle_key(key(KeyCode::Tab), &state);
+        assert!(matches!(action, Some(AppAction::NextPanel)));
+    }
+
+    #[test]
+    fn backtab_cycles_backward() {
+        let state = test_state_with_panel(Panel::Routes);
+        let action = handle_key(key(KeyCode::BackTab), &state);
+        assert!(matches!(action, Some(AppAction::PrevPanel)));
+    }
+
+    #[test]
+    fn hjkl_navigates() {
+        let state = test_state_with_panel(Panel::Streams);
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('j')), &state),
+            Some(AppAction::CursorDown)
+        ));
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('k')), &state),
+            Some(AppAction::CursorUp)
+        ));
+    }
+
+    #[test]
+    fn arrows_navigate() {
+        let state = test_state_with_panel(Panel::Streams);
+        assert!(matches!(
+            handle_key(key(KeyCode::Down), &state),
+            Some(AppAction::CursorDown)
+        ));
+        assert!(matches!(
+            handle_key(key(KeyCode::Up), &state),
+            Some(AppAction::CursorUp)
+        ));
+    }
+
+    #[test]
+    fn volume_keys_in_routes() {
+        let state = test_state_with_panel(Panel::Routes);
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('l')), &state),
+            Some(AppAction::VolumeUp { fine: false })
+        ));
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('h')), &state),
+            Some(AppAction::VolumeDown { fine: false })
+        ));
+    }
+
+    #[test]
+    fn mute_key_works() {
+        let state = test_state_with_panel(Panel::Routes);
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('m')), &state),
+            Some(AppAction::ToggleMute)
+        ));
+    }
+
+    #[test]
+    fn number_keys_select_output() {
+        // In a non-panel-specific context (e.g., Streams panel where 1-9 aren't overridden)
+        let state = test_state_with_panel(Panel::Streams);
+        let action = handle_key(key(KeyCode::Char('1')), &state);
+        assert!(matches!(action, Some(AppAction::SelectOutputTab(0))));
+        let action = handle_key(key(KeyCode::Char('9')), &state);
+        assert!(matches!(action, Some(AppAction::SelectOutputTab(8))));
+    }
+
+    #[test]
+    fn help_key_toggles() {
+        let state = test_state_with_panel(Panel::Routes);
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('?')), &state),
+            Some(AppAction::ShowHelp)
+        ));
+    }
+
+    #[test]
+    fn rules_panel_d_deletes() {
+        let state = test_state_with_panel(Panel::Rules);
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('d')), &state),
+            Some(AppAction::DeleteRule)
+        ));
+    }
+
+    #[test]
+    fn capture_panel_u_unbinds() {
+        let state = test_state_with_panel(Panel::Capture);
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('u')), &state),
+            Some(AppAction::UnbindCapture)
+        ));
+    }
+
+    #[test]
+    fn dsp_panel_e_toggles_eq() {
+        let state = test_state_with_panel(Panel::Dsp);
+        assert!(matches!(
+            handle_key(key(KeyCode::Char('e')), &state),
+            Some(AppAction::ToggleEq)
+        ));
     }
 }

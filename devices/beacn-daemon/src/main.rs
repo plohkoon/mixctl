@@ -412,6 +412,12 @@ async fn run_daemon_session(
                 let snapshot = s.build_snapshot();
                 dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
             }
+            DeviceEvent::PrevOutput => {
+                let mut s = state.lock().await;
+                s.prev_output();
+                let snapshot = s.build_snapshot();
+                dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
+            }
             DeviceEvent::PageLeft => {
                 let mut s = state.lock().await;
                 if s.current_page > 0 {

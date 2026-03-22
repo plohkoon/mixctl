@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::{
-    AppRuleData, BeacnDialog, CaptureDeviceData, CaptureDialog, MainWindow, MixerState,
-    RouteData, RulesDialog, SidebarOutput, StreamData, UserAction,
+    AppRuleData, BeacnDialog, CaptureDeviceData, CaptureDialog, CompressorData, DeesserData,
+    DspDialog, EqBandData, GateData, LimiterData, MainWindow, MixerState, RouteData, RulesDialog,
+    SidebarOutput, StreamData, UserAction,
 };
 
 pub(crate) async fn run_background(
@@ -181,6 +182,9 @@ async fn try_connect_and_run(
                             }
                             UserAction::OpenBeacnDialog => {
                                 open_beacn_dialog(&proxy).await;
+                            }
+                            UserAction::OpenDspDialog => {
+                                open_dsp_dialog(&proxy).await;
                             }
                         }
                     }
@@ -394,6 +398,518 @@ async fn open_beacn_dialog(proxy: &MixCtlProxy<'static>) {
                     });
                 });
             }
+        });
+
+        dialog.show().unwrap();
+    }).ok();
+}
+
+async fn open_dsp_dialog(proxy: &MixCtlProxy<'static>) {
+    let inputs = proxy.list_inputs().await.unwrap_or_default();
+    let outputs = proxy.list_outputs().await.unwrap_or_default();
+
+    let input_names: Vec<SharedString> = inputs.iter().map(|i| SharedString::from(i.name.as_str())).collect();
+    let output_names: Vec<SharedString> = outputs.iter().map(|o| SharedString::from(o.name.as_str())).collect();
+
+    // Fetch initial DSP state for first input/output
+    let first_input_id = inputs.first().map(|i| i.id).unwrap_or(0);
+    let first_output_id = outputs.first().map(|o| o.id).unwrap_or(0);
+
+    let eq_enabled = if first_input_id > 0 {
+        proxy.get_input_eq_enabled(first_input_id).await.unwrap_or(false)
+    } else {
+        false
+    };
+    let eq_bands_raw = if first_input_id > 0 {
+        proxy.get_input_eq(first_input_id).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let gate_info = if first_input_id > 0 {
+        proxy.get_input_gate(first_input_id).await.ok()
+    } else {
+        None
+    };
+    let deesser_info = if first_input_id > 0 {
+        proxy.get_input_deesser(first_input_id).await.ok()
+    } else {
+        None
+    };
+    let compressor_info = if first_output_id > 0 {
+        proxy.get_output_compressor(first_output_id).await.ok()
+    } else {
+        None
+    };
+    let limiter_info = if first_output_id > 0 {
+        proxy.get_output_limiter(first_output_id).await.ok()
+    } else {
+        None
+    };
+
+    let input_ids: Vec<u32> = inputs.iter().map(|i| i.id).collect();
+    let output_ids: Vec<u32> = outputs.iter().map(|o| o.id).collect();
+
+    let p = proxy.clone();
+    slint::invoke_from_event_loop(move || {
+        let dialog = DspDialog::new().unwrap();
+        dialog.set_input_names(ModelRc::new(VecModel::from(input_names)));
+        dialog.set_output_names(ModelRc::new(VecModel::from(output_names)));
+
+        // Set EQ state
+        dialog.set_eq_enabled(eq_enabled);
+        let eq_band_data: Vec<EqBandData> = eq_bands_raw.iter().map(|b| {
+            let type_idx = match b.band_type.as_str() {
+                "low_shelf" => 0,
+                "peaking" => 1,
+                "high_shelf" => 2,
+                _ => 1,
+            };
+            EqBandData {
+                band_type_index: type_idx,
+                frequency: b.frequency as f32,
+                gain_db: b.gain_db as f32,
+                q: b.q as f32,
+            }
+        }).collect();
+        // Ensure we always have 8 bands
+        let mut bands = eq_band_data;
+        while bands.len() < 8 {
+            bands.push(EqBandData {
+                band_type_index: 1,
+                frequency: 1000.0,
+                gain_db: 0.0,
+                q: 1.0,
+            });
+        }
+        dialog.set_eq_bands(ModelRc::new(VecModel::from(bands)));
+
+        // Render initial EQ curve
+        crate::eq_curve::update_eq_curve_image(&dialog);
+
+        // Set Gate state
+        if let Some(g) = &gate_info {
+            dialog.set_gate(GateData {
+                enabled: g.enabled,
+                threshold_db: g.threshold_db as f32,
+                attack_ms: g.attack_ms as f32,
+                release_ms: g.release_ms as f32,
+                hold_ms: g.hold_ms as f32,
+            });
+        } else {
+            dialog.set_gate(GateData {
+                enabled: false,
+                threshold_db: -40.0,
+                attack_ms: 1.0,
+                release_ms: 100.0,
+                hold_ms: 50.0,
+            });
+        }
+
+        // Set De-esser state
+        if let Some(d) = &deesser_info {
+            dialog.set_deesser(DeesserData {
+                enabled: d.enabled,
+                frequency: d.frequency as f32,
+                threshold_db: d.threshold_db as f32,
+                ratio: d.ratio as f32,
+            });
+        } else {
+            dialog.set_deesser(DeesserData {
+                enabled: false,
+                frequency: 6000.0,
+                threshold_db: -20.0,
+                ratio: 4.0,
+            });
+        }
+
+        // Set Compressor state
+        if let Some(c) = &compressor_info {
+            dialog.set_compressor(CompressorData {
+                enabled: c.enabled,
+                threshold_db: c.threshold_db as f32,
+                ratio: c.ratio as f32,
+                attack_ms: c.attack_ms as f32,
+                release_ms: c.release_ms as f32,
+                makeup_gain_db: c.makeup_gain_db as f32,
+                knee_db: c.knee_db as f32,
+            });
+        } else {
+            dialog.set_compressor(CompressorData {
+                enabled: false,
+                threshold_db: -20.0,
+                ratio: 4.0,
+                attack_ms: 10.0,
+                release_ms: 100.0,
+                makeup_gain_db: 0.0,
+                knee_db: 6.0,
+            });
+        }
+
+        // Set Limiter state
+        if let Some(l) = &limiter_info {
+            dialog.set_limiter(LimiterData {
+                enabled: l.enabled,
+                ceiling_db: l.ceiling_db as f32,
+                release_ms: l.release_ms as f32,
+            });
+        } else {
+            dialog.set_limiter(LimiterData {
+                enabled: false,
+                ceiling_db: -1.0,
+                release_ms: 50.0,
+            });
+        }
+
+        // --- Wire input selection ---
+        let p2 = p.clone();
+        let input_ids2 = input_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_input_selected(move |idx| {
+            let input_id = input_ids2.get(idx as usize).copied().unwrap_or(0);
+            if input_id == 0 { return; }
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    let eq_enabled = p3.get_input_eq_enabled(input_id).await.unwrap_or(false);
+                    let eq_bands = p3.get_input_eq(input_id).await.unwrap_or_default();
+                    let gate = p3.get_input_gate(input_id).await.ok();
+                    let deesser = p3.get_input_deesser(input_id).await.ok();
+
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(dlg) = d.upgrade() {
+                            dlg.set_eq_enabled(eq_enabled);
+                            let mut bands: Vec<EqBandData> = eq_bands.iter().map(|b| {
+                                let type_idx = match b.band_type.as_str() {
+                                    "low_shelf" => 0,
+                                    "peaking" => 1,
+                                    "high_shelf" => 2,
+                                    _ => 1,
+                                };
+                                EqBandData {
+                                    band_type_index: type_idx,
+                                    frequency: b.frequency as f32,
+                                    gain_db: b.gain_db as f32,
+                                    q: b.q as f32,
+                                }
+                            }).collect();
+                            while bands.len() < 8 {
+                                bands.push(EqBandData {
+                                    band_type_index: 1,
+                                    frequency: 1000.0,
+                                    gain_db: 0.0,
+                                    q: 1.0,
+                                });
+                            }
+                            dlg.set_eq_bands(ModelRc::new(VecModel::from(bands)));
+                            crate::eq_curve::update_eq_curve_image(&dlg);
+
+                            if let Some(g) = gate {
+                                dlg.set_gate(GateData {
+                                    enabled: g.enabled,
+                                    threshold_db: g.threshold_db as f32,
+                                    attack_ms: g.attack_ms as f32,
+                                    release_ms: g.release_ms as f32,
+                                    hold_ms: g.hold_ms as f32,
+                                });
+                            }
+                            if let Some(ds) = deesser {
+                                dlg.set_deesser(DeesserData {
+                                    enabled: ds.enabled,
+                                    frequency: ds.frequency as f32,
+                                    threshold_db: ds.threshold_db as f32,
+                                    ratio: ds.ratio as f32,
+                                });
+                            }
+                        }
+                    }).ok();
+                });
+            });
+        });
+
+        // --- Wire output selection ---
+        let p2 = p.clone();
+        let output_ids2 = output_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_output_selected(move |idx| {
+            let output_id = output_ids2.get(idx as usize).copied().unwrap_or(0);
+            if output_id == 0 { return; }
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    let compressor = p3.get_output_compressor(output_id).await.ok();
+                    let limiter = p3.get_output_limiter(output_id).await.ok();
+
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(dlg) = d.upgrade() {
+                            if let Some(c) = compressor {
+                                dlg.set_compressor(CompressorData {
+                                    enabled: c.enabled,
+                                    threshold_db: c.threshold_db as f32,
+                                    ratio: c.ratio as f32,
+                                    attack_ms: c.attack_ms as f32,
+                                    release_ms: c.release_ms as f32,
+                                    makeup_gain_db: c.makeup_gain_db as f32,
+                                    knee_db: c.knee_db as f32,
+                                });
+                            }
+                            if let Some(l) = limiter {
+                                dlg.set_limiter(LimiterData {
+                                    enabled: l.enabled,
+                                    ceiling_db: l.ceiling_db as f32,
+                                    release_ms: l.release_ms as f32,
+                                });
+                            }
+                        }
+                    }).ok();
+                });
+            });
+        });
+
+        // --- Wire EQ callbacks ---
+        let p2 = p.clone();
+        let input_ids2 = input_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_eq_enabled_changed(move |enabled| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_input_index() } else { return; };
+            let input_id = input_ids2.get(idx as usize).copied().unwrap_or(0);
+            if input_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_input_eq_enabled(input_id, enabled).await.ok();
+                });
+            });
+        });
+
+        let p2 = p.clone();
+        let input_ids2 = input_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_eq_band_changed(move |band_idx, type_idx, freq, gain, q| {
+            let d = d_weak.clone();
+            let sel_idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_input_index() } else { return; };
+            let input_id = input_ids2.get(sel_idx as usize).copied().unwrap_or(0);
+            if input_id == 0 { return; }
+            let band_type = match type_idx {
+                0 => "low_shelf",
+                2 => "high_shelf",
+                _ => "peaking",
+            }.to_string();
+
+            // Update the EQ curve image immediately
+            if let Some(dlg) = d.upgrade() {
+                let mut bands = crate::eq_curve::bands_from_dialog(&dlg);
+                if let Some(b) = bands.get_mut(band_idx as usize) {
+                    b.band_type = band_type.clone();
+                    b.frequency = freq as f64;
+                    b.gain_db = gain as f64;
+                    b.q = q as f64;
+                }
+                let image = crate::eq_curve::render_eq_curve(&bands, 600, 200);
+                dlg.set_eq_curve_image(image);
+            }
+
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_input_eq_band(input_id, band_idx as u8, &band_type, freq as f64, gain as f64, q as f64).await.ok();
+                });
+            });
+        });
+
+        let p2 = p.clone();
+        let input_ids2 = input_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_reset_eq(move || {
+            let d = d_weak.clone();
+            let sel_idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_input_index() } else { return; };
+            let input_id = input_ids2.get(sel_idx as usize).copied().unwrap_or(0);
+            if input_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.reset_input_eq(input_id).await.ok();
+                    // Refresh EQ bands
+                    let eq_enabled = p3.get_input_eq_enabled(input_id).await.unwrap_or(false);
+                    let eq_bands = p3.get_input_eq(input_id).await.unwrap_or_default();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(dlg) = d.upgrade() {
+                            dlg.set_eq_enabled(eq_enabled);
+                            let mut bands: Vec<EqBandData> = eq_bands.iter().map(|b| {
+                                let type_idx = match b.band_type.as_str() {
+                                    "low_shelf" => 0,
+                                    "peaking" => 1,
+                                    "high_shelf" => 2,
+                                    _ => 1,
+                                };
+                                EqBandData {
+                                    band_type_index: type_idx,
+                                    frequency: b.frequency as f32,
+                                    gain_db: b.gain_db as f32,
+                                    q: b.q as f32,
+                                }
+                            }).collect();
+                            while bands.len() < 8 {
+                                bands.push(EqBandData {
+                                    band_type_index: 1,
+                                    frequency: 1000.0,
+                                    gain_db: 0.0,
+                                    q: 1.0,
+                                });
+                            }
+                            dlg.set_eq_bands(ModelRc::new(VecModel::from(bands)));
+                            crate::eq_curve::update_eq_curve_image(&dlg);
+                        }
+                    }).ok();
+                });
+            });
+        });
+
+        // --- Wire Gate callbacks ---
+        let p2 = p.clone();
+        let input_ids2 = input_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_gate_enabled_changed(move |enabled| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_input_index() } else { return; };
+            let input_id = input_ids2.get(idx as usize).copied().unwrap_or(0);
+            if input_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_input_gate_enabled(input_id, enabled).await.ok();
+                });
+            });
+        });
+
+        let p2 = p.clone();
+        let input_ids2 = input_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_gate_changed(move |threshold, attack, release, hold| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_input_index() } else { return; };
+            let input_id = input_ids2.get(idx as usize).copied().unwrap_or(0);
+            if input_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_input_gate(input_id, threshold as f64, attack as f64, release as f64, hold as f64).await.ok();
+                });
+            });
+        });
+
+        // --- Wire De-esser callbacks ---
+        let p2 = p.clone();
+        let input_ids2 = input_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_deesser_enabled_changed(move |enabled| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_input_index() } else { return; };
+            let input_id = input_ids2.get(idx as usize).copied().unwrap_or(0);
+            if input_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_input_deesser_enabled(input_id, enabled).await.ok();
+                });
+            });
+        });
+
+        let p2 = p.clone();
+        let input_ids2 = input_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_deesser_changed(move |freq, threshold, ratio| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_input_index() } else { return; };
+            let input_id = input_ids2.get(idx as usize).copied().unwrap_or(0);
+            if input_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_input_deesser(input_id, freq as f64, threshold as f64, ratio as f64).await.ok();
+                });
+            });
+        });
+
+        // --- Wire Compressor callbacks ---
+        let p2 = p.clone();
+        let output_ids2 = output_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_compressor_enabled_changed(move |enabled| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_output_index() } else { return; };
+            let output_id = output_ids2.get(idx as usize).copied().unwrap_or(0);
+            if output_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_output_compressor_enabled(output_id, enabled).await.ok();
+                });
+            });
+        });
+
+        let p2 = p.clone();
+        let output_ids2 = output_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_compressor_changed(move |threshold, ratio, attack, release, makeup, knee| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_output_index() } else { return; };
+            let output_id = output_ids2.get(idx as usize).copied().unwrap_or(0);
+            if output_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_output_compressor(output_id, threshold as f64, ratio as f64, attack as f64, release as f64, makeup as f64, knee as f64).await.ok();
+                });
+            });
+        });
+
+        // --- Wire Limiter callbacks ---
+        let p2 = p.clone();
+        let output_ids2 = output_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_limiter_enabled_changed(move |enabled| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_output_index() } else { return; };
+            let output_id = output_ids2.get(idx as usize).copied().unwrap_or(0);
+            if output_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_output_limiter_enabled(output_id, enabled).await.ok();
+                });
+            });
+        });
+
+        let p2 = p.clone();
+        let output_ids2 = output_ids.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_limiter_changed(move |ceiling, release| {
+            let d = d_weak.clone();
+            let idx = if let Some(dlg) = d.upgrade() { dlg.get_selected_output_index() } else { return; };
+            let output_id = output_ids2.get(idx as usize).copied().unwrap_or(0);
+            if output_id == 0 { return; }
+            let p3 = p2.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_output_limiter(output_id, ceiling as f64, release as f64).await.ok();
+                });
+            });
         });
 
         dialog.show().unwrap();
