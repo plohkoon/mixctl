@@ -1,0 +1,10 @@
+# BEACN Mix Create - grant user access without root
+# USB Vendor ID: 0x3456 (BEACN), Product ID varies by model
+# Install: sudo cp 99-beacn-mix.rules /etc/udev/rules.d/
+# Reload: sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# BEACN Mix Create
+SUBSYSTEM=="usb", ATTR{idVendor}=="3456", TAG+="uaccess"
+
+# BEACN Mix (original)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3456", TAG+="uaccess"

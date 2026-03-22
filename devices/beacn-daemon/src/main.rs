@@ -2,6 +2,7 @@ mod state;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_lite::StreamExt;
 use mixctl_core::config_sections::BeacnConfig;
@@ -9,10 +10,27 @@ use mixctl_core::dbus::MixCtlProxy;
 use mixctl_beacn_device::{DeviceCommand, DeviceEvent, DeviceThread};
 use mixctl_beacn_display::DeviceLayoutKind;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tracing::{info, warn, Level};
 use tracing_subscriber::EnvFilter;
 
 use crate::state::BeacnState;
+
+/// Drop guard that ensures the device thread receives a Shutdown command
+/// regardless of how the process exits (panic, early return, signal).
+struct ShutdownGuard {
+    tx: Option<tokio::sync::mpsc::UnboundedSender<DeviceCommand>>,
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for ShutdownGuard {
+    fn drop(&mut self) {
+        self.flag.store(true, Ordering::Release);
+        if let Some(tx) = self.tx.take() {
+            tx.send(DeviceCommand::Shutdown).ok();
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,37 +40,21 @@ async fn main() -> anyhow::Result<()> {
 
     info!("mixctl-beacn-daemon starting");
 
-    // Connect to the mixer daemon via D-Bus
-    let conn = zbus::Connection::session().await?;
-    let proxy = MixCtlProxy::new(&conn).await?;
-    info!("connected to mixer daemon via D-Bus");
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
 
-    // Fetch beacn config section from daemon
-    let beacn_config = match proxy.get_config_section("beacn").await {
-        Ok(json) => serde_json::from_str::<BeacnConfig>(&json).unwrap_or_default(),
-        Err(e) => {
-            warn!("failed to fetch beacn config: {e}, using defaults");
-            BeacnConfig::default()
-        }
-    };
-    info!("beacn config: layout={}, dial_sensitivity={}, level_decay={}",
-        beacn_config.layout, beacn_config.dial_sensitivity, beacn_config.level_decay);
+    // Device channels — device thread runs independently of D-Bus
+    let (dev_cmd_tx, dev_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceCommand>();
+    let (dev_event_tx, dev_event_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceEvent>();
 
-    // Parse layout from args, falling back to config
+    // Parse layout from args (or use default, will be overridden by config)
     let layout_name = std::env::args().nth(1).unwrap_or_default();
     let layout_kind = if layout_name.is_empty() {
-        DeviceLayoutKind::from_str_loose(&beacn_config.layout)
+        DeviceLayoutKind::Column
     } else {
         DeviceLayoutKind::from_str_loose(&layout_name)
     };
     let layout = layout_kind.create_layout();
-    info!("display layout: {layout_kind:?}");
-
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-
-    // Device channels
-    let (dev_cmd_tx, dev_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceCommand>();
-    let (dev_event_tx, mut dev_event_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceEvent>();
+    info!("initial display layout: {layout_kind:?}");
 
     let device_thread = DeviceThread::spawn(
         shutdown_flag.clone(),
@@ -61,19 +63,124 @@ async fn main() -> anyhow::Result<()> {
         layout,
     );
 
-    // Shared state
-    let state = Arc::new(Mutex::new(BeacnState::new_with_config(
-        beacn_config.dial_sensitivity,
-        beacn_config.level_decay,
-    )));
+    // Signal handler (Ctrl-C and SIGTERM)
+    let sf = shutdown_flag.clone();
+    let shutdown_tx = dev_cmd_tx.clone();
+    tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ).expect("failed to register SIGTERM handler");
 
-    // Build initial snapshot from D-Bus
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl-C received, shutting down");
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received, shutting down");
+            }
+        }
+        sf.store(true, Ordering::Release);
+        shutdown_tx.send(DeviceCommand::Shutdown).ok();
+    });
+
+    // Safety guard: ensure device gets Shutdown on any exit path
+    let guard_tx = dev_cmd_tx.clone();
+    let guard_flag = shutdown_flag.clone();
+    let _shutdown_guard = ShutdownGuard { tx: Some(guard_tx), flag: guard_flag };
+
+    // D-Bus reconnection loop — retries when daemon is unavailable
+    let state = Arc::new(Mutex::new(BeacnState::new_with_config(3, 0.85)));
+    let dev_event_rx = Arc::new(Mutex::new(dev_event_rx));
+
+    loop {
+        if shutdown_flag.load(Ordering::Acquire) {
+            break;
+        }
+
+        match run_daemon_session(
+            &state,
+            &dev_cmd_tx,
+            &dev_event_rx,
+            &shutdown_flag,
+        ).await {
+            Ok(()) => break, // clean shutdown
+            Err(e) => {
+                warn!("daemon session ended: {e}");
+                dev_cmd_tx.send(DeviceCommand::ShowWaiting).ok();
+                // Wait before retrying
+                for _ in 0..20 {
+                    if shutdown_flag.load(Ordering::Acquire) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    // Ensure device gets shut down cleanly
+    shutdown_flag.store(true, Ordering::Release);
+    dev_cmd_tx.send(DeviceCommand::Shutdown).ok();
+    info!("waiting for device thread");
+    device_thread.join();
+    info!("mixctl-beacn-daemon stopped");
+    Ok(())
+}
+
+/// Run a single daemon session: connect, subscribe, process events.
+/// Returns Ok(()) on clean shutdown, Err on daemon disconnect.
+async fn run_daemon_session(
+    state: &Arc<Mutex<BeacnState>>,
+    dev_cmd_tx: &tokio::sync::mpsc::UnboundedSender<DeviceCommand>,
+    dev_event_rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<DeviceEvent>>>,
+    shutdown_flag: &Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    // Connect to D-Bus
+    let conn = zbus::Connection::session().await?;
+    let proxy = MixCtlProxy::new(&conn).await?;
+
+    // Verify daemon is alive
+    proxy.ping().await?;
+    info!("connected to mixer daemon via D-Bus");
+
+    // Register as component
+    proxy.register_component("beacn").await.ok();
+
+    // Fetch config
+    let beacn_config = match proxy.get_config_section("beacn").await {
+        Ok(json) => serde_json::from_str::<BeacnConfig>(&json).unwrap_or_default(),
+        Err(_) => BeacnConfig::default(),
+    };
+
+    // Apply config to state
+    {
+        let mut s = state.lock().await;
+        s.dial_sensitivity = beacn_config.dial_sensitivity;
+        s.level_decay = beacn_config.level_decay;
+    }
+
+    // Apply layout, brightness, and button mappings from config
+    let layout_kind = DeviceLayoutKind::from_str_loose(&beacn_config.layout);
+    dev_cmd_tx.send(DeviceCommand::ChangeLayout(layout_kind.create_layout())).ok();
+    dev_cmd_tx.send(DeviceCommand::SetBrightness {
+        display: beacn_config.display_brightness,
+        led: beacn_config.led_brightness,
+    }).ok();
+    dev_cmd_tx.send(DeviceCommand::SetButtonMappings(beacn_config.button_mappings.clone())).ok();
+    info!("beacn config: layout={}, dial_sensitivity={}, brightness={}:{}, level_decay={}",
+        beacn_config.layout, beacn_config.dial_sensitivity,
+        beacn_config.display_brightness, beacn_config.led_brightness,
+        beacn_config.level_decay);
+
+    // Build initial snapshot
     {
         let mut s = state.lock().await;
         if let Err(e) = s.refresh_from_dbus(&proxy).await {
-            warn!("initial D-Bus refresh failed (mixer daemon may not be running yet): {e}");
+            warn!("initial D-Bus refresh failed: {e}");
         }
-        // Check if level broadcasting is enabled
+        if let Err(e) = s.refresh_streams(&proxy).await {
+            warn!("initial stream fetch failed: {e}");
+        }
         match proxy.get_broadcast_levels().await {
             Ok(enabled) => s.levels_enabled = enabled,
             Err(e) => warn!("get_broadcast_levels failed: {e}"),
@@ -82,72 +189,66 @@ async fn main() -> anyhow::Result<()> {
         dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
     }
 
-    // Subscribe to D-Bus signals — any state change triggers a refresh
-    let signal_state = state.clone();
-    let signal_tx = dev_cmd_tx.clone();
-    let signal_proxy = proxy.clone();
+    // Subscribe to D-Bus signals — spawn listeners and track handles for cleanup
+    let mut signal_tasks: Vec<JoinHandle<()>> = Vec::new();
 
-    // inputs_config_changed
-    let s1 = signal_state.clone();
-    let t1 = signal_tx.clone();
-    let p1 = signal_proxy.clone();
-    let mut inputs_changed = proxy.receive_inputs_config_changed().await?;
-    tokio::spawn(async move {
-        while inputs_changed.next().await.is_some() {
-            refresh_and_notify(&s1, &t1, &p1).await;
-        }
+    // Helper macro to reduce signal subscription boilerplate
+    macro_rules! spawn_signal {
+        ($stream:expr, $body:expr) => {{
+            let mut stream = $stream;
+            signal_tasks.push(tokio::spawn(async move {
+                while stream.next().await.is_some() {
+                    $body;
+                }
+            }));
+        }};
+    }
+
+    // inputs/outputs/output_state/route/page → full refresh
+    let (s1, t1, p1) = (state.clone(), dev_cmd_tx.clone(), proxy.clone());
+    spawn_signal!(proxy.receive_inputs_config_changed().await?, {
+        refresh_and_notify(&s1, &t1, &p1).await;
+    });
+    let (s2, t2, p2) = (state.clone(), dev_cmd_tx.clone(), proxy.clone());
+    spawn_signal!(proxy.receive_outputs_config_changed().await?, {
+        refresh_and_notify(&s2, &t2, &p2).await;
+    });
+    let (s3, t3, p3) = (state.clone(), dev_cmd_tx.clone(), proxy.clone());
+    spawn_signal!(proxy.receive_output_state_changed().await?, {
+        refresh_and_notify(&s3, &t3, &p3).await;
+    });
+    let (s4, t4, p4) = (state.clone(), dev_cmd_tx.clone(), proxy.clone());
+    spawn_signal!(proxy.receive_route_changed().await?, {
+        refresh_and_notify(&s4, &t4, &p4).await;
+    });
+    let (s5, t5, p5) = (state.clone(), dev_cmd_tx.clone(), proxy.clone());
+    spawn_signal!(proxy.receive_page_changed().await?, {
+        refresh_and_notify(&s5, &t5, &p5).await;
     });
 
-    // outputs_config_changed
-    let s2 = signal_state.clone();
-    let t2 = signal_tx.clone();
-    let p2 = signal_proxy.clone();
-    let mut outputs_changed = proxy.receive_outputs_config_changed().await?;
-    tokio::spawn(async move {
-        while outputs_changed.next().await.is_some() {
-            refresh_and_notify(&s2, &t2, &p2).await;
+    // streams_changed → refresh streams only
+    let s_streams = state.clone();
+    let t_streams = dev_cmd_tx.clone();
+    let p_streams = proxy.clone();
+    let mut streams_changed = proxy.receive_streams_changed().await?;
+    signal_tasks.push(tokio::spawn(async move {
+        while streams_changed.next().await.is_some() {
+            let mut s = s_streams.lock().await;
+            if let Err(e) = s.refresh_streams(&p_streams).await {
+                warn!("stream refresh failed: {e}");
+                continue;
+            }
+            let snapshot = s.build_snapshot();
+            t_streams.send(DeviceCommand::UpdateState(snapshot)).ok();
         }
-    });
+    }));
 
-    // output_state_changed
-    let s3 = signal_state.clone();
-    let t3 = signal_tx.clone();
-    let p3 = signal_proxy.clone();
-    let mut output_state = proxy.receive_output_state_changed().await?;
-    tokio::spawn(async move {
-        while output_state.next().await.is_some() {
-            refresh_and_notify(&s3, &t3, &p3).await;
-        }
-    });
-
-    // route_changed
-    let s4 = signal_state.clone();
-    let t4 = signal_tx.clone();
-    let p4 = signal_proxy.clone();
-    let mut route = proxy.receive_route_changed().await?;
-    tokio::spawn(async move {
-        while route.next().await.is_some() {
-            refresh_and_notify(&s4, &t4, &p4).await;
-        }
-    });
-
-    // page_changed
-    let s5 = signal_state.clone();
-    let t5 = signal_tx.clone();
-    let p5 = signal_proxy.clone();
-    let mut page = proxy.receive_page_changed().await?;
-    tokio::spawn(async move {
-        while page.next().await.is_some() {
-            refresh_and_notify(&s5, &t5, &p5).await;
-        }
-    });
-
-    // broadcast_levels_changed — toggle level monitoring
-    let s6 = signal_state.clone();
-    let t6 = signal_tx.clone();
-    let p6 = signal_proxy.clone();
+    // broadcast_levels_changed
+    let s6 = state.clone();
+    let t6 = dev_cmd_tx.clone();
+    let p6 = proxy.clone();
     let mut broadcast_levels = proxy.receive_broadcast_levels_changed().await?;
-    tokio::spawn(async move {
+    signal_tasks.push(tokio::spawn(async move {
         while let Some(signal) = broadcast_levels.next().await {
             let args = match signal.args() {
                 Ok(a) => a,
@@ -161,20 +262,19 @@ async fn main() -> anyhow::Result<()> {
             }
             let snapshot = s.build_snapshot();
             t6.send(DeviceCommand::UpdateState(snapshot)).ok();
-            // If re-enabled, refresh levels
             if enabled {
                 drop(s);
                 refresh_and_notify(&s6, &t6, &p6).await;
             }
         }
-    });
+    }));
 
-    // config_section_changed — re-fetch beacn config
-    let s8 = signal_state.clone();
-    let t8 = signal_tx.clone();
-    let p8 = signal_proxy.clone();
+    // config_section_changed
+    let s8 = state.clone();
+    let t8 = dev_cmd_tx.clone();
+    let p8 = proxy.clone();
     let mut config_section = proxy.receive_config_section_changed().await?;
-    tokio::spawn(async move {
+    signal_tasks.push(tokio::spawn(async move {
         while let Some(signal) = config_section.next().await {
             let args = match signal.args() {
                 Ok(a) => a,
@@ -189,27 +289,31 @@ async fn main() -> anyhow::Result<()> {
                         let mut s = s8.lock().await;
                         s.dial_sensitivity = config.dial_sensitivity;
                         s.level_decay = config.level_decay;
-                        info!("beacn config updated: layout={}, dial_sensitivity={}, level_decay={}",
-                            config.layout, config.dial_sensitivity, config.level_decay);
+                        info!("beacn config updated: dial_sensitivity={}, level_decay={}",
+                            config.dial_sensitivity, config.level_decay);
                         let snapshot = s.build_snapshot();
                         t8.send(DeviceCommand::UpdateState(snapshot)).ok();
-                        // Apply layout change at runtime
                         let new_kind = DeviceLayoutKind::from_str_loose(&config.layout);
                         let new_layout = new_kind.create_layout();
                         info!("switching display layout to {new_kind:?}");
                         t8.send(DeviceCommand::ChangeLayout(new_layout)).ok();
+                        t8.send(DeviceCommand::SetBrightness {
+                            display: config.display_brightness,
+                            led: config.led_brightness,
+                        }).ok();
+                        t8.send(DeviceCommand::SetButtonMappings(config.button_mappings.clone())).ok();
                     }
                 }
                 Err(e) => warn!("failed to re-fetch beacn config: {e}"),
             }
         }
-    });
+    }));
 
-    // input_levels_changed — update levels at ~20Hz
-    let s7 = signal_state.clone();
-    let t7 = signal_tx.clone();
+    // input_levels_changed — ~20Hz updates
+    let s7 = state.clone();
+    let t7 = dev_cmd_tx.clone();
     let mut input_levels = proxy.receive_input_levels_changed().await?;
-    tokio::spawn(async move {
+    signal_tasks.push(tokio::spawn(async move {
         while let Some(signal) = input_levels.next().await {
             let args = match signal.args() {
                 Ok(a) => a,
@@ -219,7 +323,6 @@ async fn main() -> anyhow::Result<()> {
             if !s.levels_enabled {
                 continue;
             }
-            // Apply decay to existing levels first, then overlay new data
             s.decay_levels();
             for &(id, level) in &args.levels {
                 s.input_levels.insert(id, level as f32);
@@ -227,28 +330,26 @@ async fn main() -> anyhow::Result<()> {
             let snapshot = s.build_snapshot();
             t7.send(DeviceCommand::UpdateState(snapshot)).ok();
         }
-    });
+    }));
 
-    // Ctrl-C handler
-    let sf = shutdown_flag.clone();
-    let shutdown_tx = dev_cmd_tx.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        info!("Ctrl-C received, shutting down");
-        sf.store(true, Ordering::Release);
-        shutdown_tx.send(DeviceCommand::Shutdown).ok();
-    });
-
-    // Device event loop — handle hardware input, call D-Bus methods
+    // Device event loop — handle hardware input
+    let mut dev_rx = dev_event_rx.lock().await;
     loop {
         let event = tokio::select! {
-            e = dev_event_rx.recv() => match e {
+            e = dev_rx.recv() => match e {
                 Some(e) => e,
                 None => break,
             },
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
                 if shutdown_flag.load(Ordering::Acquire) {
-                    break;
+                    // Abort signal listeners and return clean shutdown
+                    for task in &signal_tasks { task.abort(); }
+                    return Ok(());
+                }
+                // Check if daemon is still alive by pinging
+                if proxy.ping().await.is_err() {
+                    for task in &signal_tasks { task.abort(); }
+                    return Err(anyhow::anyhow!("daemon disconnected"));
                 }
                 continue;
             }
@@ -260,6 +361,9 @@ async fn main() -> anyhow::Result<()> {
                 let mut s = state.lock().await;
                 if let Err(e) = s.refresh_from_dbus(&proxy).await {
                     warn!("D-Bus refresh failed: {e}");
+                }
+                if let Err(e) = s.refresh_streams(&proxy).await {
+                    warn!("stream refresh failed: {e}");
                 }
                 let snapshot = s.build_snapshot();
                 dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
@@ -275,7 +379,6 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(e) = proxy.set_route_volume(input_id, output_id, new_vol).await {
                     warn!("set_route_volume failed: {e}");
                 }
-                // Optimistic local update for responsiveness
                 s.set_route_volume(input_id, output_id, new_vol);
                 let snapshot = s.build_snapshot();
                 dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
@@ -335,9 +438,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    info!("waiting for device thread");
-    device_thread.join();
-    info!("mixctl-beacn-daemon stopped");
+    // Signal tasks will be cleaned up when their proxies are dropped
+    for task in &signal_tasks {
+        task.abort();
+    }
     Ok(())
 }
 

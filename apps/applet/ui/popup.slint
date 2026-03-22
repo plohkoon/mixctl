@@ -22,6 +22,7 @@ export global AppletState {
     in-out property <[OutputStripData]> outputs;
     in-out property <[RouteStripData]> routes;
     in-out property <string> selected-output-name: "(none)";
+    in-out property <bool> daemon-connected: false;
 
     callback set-output-volume(int, int);
     callback set-output-mute(int, bool);
@@ -35,6 +36,18 @@ export component PopupWindow inherits Window {
     title: "MixCtl";
     width: 380px;
     no-frame: true;
+
+    if !AppletState.daemon-connected: Rectangle {
+        background: #2c3e50ee;
+
+        Text {
+            text: "Waiting for daemon...";
+            color: #bbb;
+            font-size: 14px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
 
     VerticalBox {
         padding: 8px;

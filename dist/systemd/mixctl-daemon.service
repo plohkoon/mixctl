@@ -1,0 +1,15 @@
+[Unit]
+Description=MixCtl Audio Mixer Daemon
+Documentation=https://github.com/greghuber/mixctl
+After=pipewire.service
+Wants=pipewire.service
+
+[Service]
+Type=dbus
+BusName=dev.greghuber.MixCtl
+ExecStart=%h/.cargo/bin/mixctl-daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

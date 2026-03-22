@@ -1,13 +1,16 @@
 use mixctl_core::{
-    AppRuleInfo, CaptureDeviceInfo, InputInfo, OutputInfo, PlaybackDeviceInfo, RouteInfo,
-    StreamInfo, parse_hex_color,
+    AppRuleInfo, CaptureDeviceInfo, ComponentInfo, InputInfo, OutputInfo, PlaybackDeviceInfo,
+    RouteInfo, StreamInfo, parse_hex_color,
 };
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
 
 use mixctl_core::config_sections::{AppletConfig, BeacnConfig, CliConfig, UiConfig};
 
+use tracing::{info, warn};
+
 use crate::audio::PwCommand;
+use crate::audio::mixer::MAX_SLOTS;
 use crate::audio::volume::u8_to_pw_volume;
 use crate::service::{Service, ServiceSignal};
 
@@ -83,6 +86,11 @@ impl Service {
         name: &str,
         color: &str,
     ) -> zbus::fdo::Result<u32> {
+        if name.is_empty() || name.len() > 50 {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "name must be 1-50 characters".into(),
+            ));
+        }
         if parse_hex_color(color).is_none() {
             return Err(zbus::fdo::Error::InvalidArgs(format!(
                 "invalid hex color '{}'",
@@ -90,6 +98,11 @@ impl Service {
             )));
         }
         let mut shared = self.inner.lock().await;
+        if shared.config.inputs.len() >= MAX_SLOTS {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                format!("maximum number of inputs ({}) reached", MAX_SLOTS),
+            ));
+        }
         let id = shared.config.next_unused_id();
         shared.config.inputs.push(crate::config::ChannelConfig {
             id: Some(id),
@@ -190,6 +203,11 @@ impl Service {
         id: u32,
         name: &str,
     ) -> zbus::fdo::Result<()> {
+        if name.is_empty() || name.len() > 50 {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "name must be 1-50 characters".into(),
+            ));
+        }
         let mut shared = self.inner.lock().await;
         let cfg = shared
             .config
@@ -274,6 +292,11 @@ impl Service {
         color: &str,
         source_output_id: u32,
     ) -> zbus::fdo::Result<u32> {
+        if name.is_empty() || name.len() > 50 {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "name must be 1-50 characters".into(),
+            ));
+        }
         if parse_hex_color(color).is_none() {
             return Err(zbus::fdo::Error::InvalidArgs(format!(
                 "invalid hex color '{}'",
@@ -281,6 +304,11 @@ impl Service {
             )));
         }
         let mut shared = self.inner.lock().await;
+        if shared.config.outputs.len() >= MAX_SLOTS {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                format!("maximum number of outputs ({}) reached", MAX_SLOTS),
+            ));
+        }
         let id = shared.config.next_unused_id();
         shared.config.outputs.push(crate::config::ChannelConfig {
             id: Some(id),
@@ -381,6 +409,11 @@ impl Service {
         id: u32,
         name: &str,
     ) -> zbus::fdo::Result<()> {
+        if name.is_empty() || name.len() > 50 {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "name must be 1-50 characters".into(),
+            ));
+        }
         let mut shared = self.inner.lock().await;
         let cfg = shared
             .config
@@ -434,12 +467,7 @@ impl Service {
         id: u32,
         volume: u8,
     ) -> zbus::fdo::Result<()> {
-        if volume > 100 {
-            return Err(zbus::fdo::Error::InvalidArgs(format!(
-                "volume {} exceeds maximum of 100",
-                volume
-            )));
-        }
+        let volume = volume.min(100);
         let mut shared = self.inner.lock().await;
         if shared.config.find_output(id).is_none() {
             return Err(zbus::fdo::Error::Failed(format!(
@@ -578,12 +606,7 @@ impl Service {
         output_id: u32,
         volume: u8,
     ) -> zbus::fdo::Result<()> {
-        if volume > 100 {
-            return Err(zbus::fdo::Error::InvalidArgs(format!(
-                "volume {} exceeds maximum of 100",
-                volume
-            )));
-        }
+        let volume = volume.min(100);
         let mut shared = self.inner.lock().await;
         if shared.config.find_input(input_id).is_none() {
             return Err(zbus::fdo::Error::Failed(format!(
@@ -705,11 +728,11 @@ impl Service {
                 });
             }
             shared.config_dirty = true;
-            drop(shared);
+        }
+        shared.signal_tx.send(ServiceSignal::StreamsChanged).ok();
+        drop(shared);
+        if remember {
             Self::app_rules_changed(&emitter).await.ok();
-        } else {
-            shared.signal_tx.send(ServiceSignal::StreamsChanged).ok();
-            drop(shared);
         }
         Ok(())
     }
@@ -819,6 +842,11 @@ impl Service {
         name: &str,
         color: &str,
     ) -> zbus::fdo::Result<u32> {
+        if name.is_empty() || name.len() > 50 {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "name must be 1-50 characters".into(),
+            ));
+        }
         if parse_hex_color(color).is_none() {
             return Err(zbus::fdo::Error::InvalidArgs(format!(
                 "invalid hex color '{}'",
@@ -827,6 +855,11 @@ impl Service {
         }
 
         let mut shared = self.inner.lock().await;
+        if shared.config.inputs.len() >= MAX_SLOTS {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                format!("maximum number of inputs ({}) reached", MAX_SLOTS),
+            ));
+        }
         let device_state = shared
             .capture_devices
             .get(&pw_node_id)
@@ -918,15 +951,44 @@ impl Service {
         device_name: &str,
     ) -> zbus::fdo::Result<()> {
         let mut shared = self.inner.lock().await;
+        {
+            let cfg = shared
+                .config
+                .find_input(input_id)
+                .ok_or_else(|| zbus::fdo::Error::Failed(format!("input id {} not found", input_id)))?;
+            if cfg.capture_device.is_some() {
+                return Err(zbus::fdo::Error::Failed(
+                    "input already has a capture device bound".into(),
+                ));
+            }
+        }
+        // Feedback loop detection: check if any output targeted at the same
+        // hardware device as this capture would create a mic→speaker→mic loop.
+        for output in &shared.config.outputs {
+            if let Some(ref target) = output.target_device {
+                // Simple heuristic: if the capture device name and target device
+                // share the same USB device path (e.g., both contain "Yeti"),
+                // warn about potential feedback.
+                let capture_base = device_name.split('.').nth(1).unwrap_or("");
+                let target_base = target.split('.').nth(1).unwrap_or("");
+                if !capture_base.is_empty() && capture_base == target_base {
+                    // Check if this input routes to that output with non-zero volume
+                    let route_key = format!("{input_id}:{}", output.id());
+                    let is_routed = shared.state.routes.get(&route_key)
+                        .map(|r| !r.muted && r.volume > 0)
+                        .unwrap_or(true); // default route is unmuted
+                    if is_routed {
+                        warn!("potential feedback loop: capture device '{device_name}' routes to output '{}' which targets '{target}' (same hardware)", output.name);
+                        // Don't block — just warn. User may have headphones on the same device.
+                    }
+                }
+            }
+        }
+
         let cfg = shared
             .config
             .find_input_mut(input_id)
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("input id {} not found", input_id)))?;
-        if cfg.capture_device.is_some() {
-            return Err(zbus::fdo::Error::Failed(
-                "input already has a capture device bound".into(),
-            ));
-        }
         cfg.capture_device = Some(device_name.to_string());
         shared.state.ensure_capture_volume(input_id);
         shared.config_dirty = true;
@@ -954,12 +1016,7 @@ impl Service {
         id: u32,
         volume: u8,
     ) -> zbus::fdo::Result<()> {
-        if volume > 100 {
-            return Err(zbus::fdo::Error::InvalidArgs(format!(
-                "volume {} exceeds maximum of 100",
-                volume
-            )));
-        }
+        let volume = volume.min(100);
         let mut shared = self.inner.lock().await;
         let cfg = shared
             .config
@@ -1166,6 +1223,428 @@ impl Service {
         Ok(levels)
     }
 
+    // -- Component tracking --
+
+    async fn register_component(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        component_type: &str,
+    ) -> zbus::fdo::Result<()> {
+        let sender = header
+            .sender()
+            .ok_or_else(|| zbus::fdo::Error::Failed("no sender".into()))?
+            .to_string();
+        let mut shared = self.inner.lock().await;
+        shared.components.insert(sender.clone(), component_type.to_string());
+        info!("component registered: {component_type} ({sender})");
+        shared.signal_tx.send(ServiceSignal::ComponentChanged).ok();
+        drop(shared);
+        Self::component_changed(&emitter).await.ok();
+        Ok(())
+    }
+
+    async fn list_components(&self) -> zbus::fdo::Result<Vec<ComponentInfo>> {
+        let shared = self.inner.lock().await;
+        let components: Vec<ComponentInfo> = shared
+            .components
+            .iter()
+            .map(|(bus_name, component_type)| ComponentInfo {
+                bus_name: bus_name.clone(),
+                component_type: component_type.clone(),
+            })
+            .collect();
+        Ok(components)
+    }
+
+    // -- DSP: EQ (per input, 8 bands) --
+
+    async fn set_input_eq_enabled(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        input_id: u32,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        shared.state.ensure_input_eq(input_id).enabled = enabled;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetInputEqEnabled { input_id, enabled });
+        drop(shared);
+        Self::input_dsp_changed(&emitter, input_id).await.ok();
+        Ok(())
+    }
+
+    async fn get_input_eq_enabled(&self, input_id: u32) -> zbus::fdo::Result<bool> {
+        let shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        Ok(shared.state.input_eq_state(input_id).map(|s| s.enabled).unwrap_or(false))
+    }
+
+    async fn set_input_eq_band(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        input_id: u32,
+        band: u8,
+        band_type: &str,
+        freq: f64,
+        gain_db: f64,
+        q: f64,
+    ) -> zbus::fdo::Result<()> {
+        if band >= 8 {
+            return Err(zbus::fdo::Error::InvalidArgs("band must be 0-7".into()));
+        }
+        let valid_types = ["peaking", "low_shelf", "high_shelf", "bypass"];
+        if !valid_types.contains(&band_type) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!(
+                "invalid band_type '{}', expected one of: peaking, low_shelf, high_shelf, bypass",
+                band_type
+            )));
+        }
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        let eq = shared.state.ensure_input_eq(input_id);
+        while eq.bands.len() <= band as usize {
+            eq.bands.push(crate::state::EqBandDspState::default());
+        }
+        eq.bands[band as usize] = crate::state::EqBandDspState {
+            band_type: band_type.to_string(),
+            frequency: freq,
+            gain_db,
+            q,
+        };
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetInputEqBand {
+            input_id,
+            band,
+            band_type: band_type.to_string(),
+            freq,
+            gain_db,
+            q,
+        });
+        drop(shared);
+        Self::input_dsp_changed(&emitter, input_id).await.ok();
+        Ok(())
+    }
+
+    async fn get_input_eq(
+        &self,
+        input_id: u32,
+    ) -> zbus::fdo::Result<Vec<mixctl_core::EqBandInfo>> {
+        let shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        let eq = shared.state.input_eq_state(input_id);
+        match eq {
+            Some(eq) => Ok(eq.bands.iter().map(|b| mixctl_core::EqBandInfo {
+                band_type: b.band_type.clone(),
+                frequency: b.frequency,
+                gain_db: b.gain_db,
+                q: b.q,
+            }).collect()),
+            None => {
+                let default = crate::state::InputEqDspState::default();
+                Ok(default.bands.iter().map(|b| mixctl_core::EqBandInfo {
+                    band_type: b.band_type.clone(),
+                    frequency: b.frequency,
+                    gain_db: b.gain_db,
+                    q: b.q,
+                }).collect())
+            }
+        }
+    }
+
+    async fn reset_input_eq(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        input_id: u32,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        *shared.state.ensure_input_eq(input_id) = crate::state::InputEqDspState::default();
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::ResetInputEq { input_id });
+        drop(shared);
+        Self::input_dsp_changed(&emitter, input_id).await.ok();
+        Ok(())
+    }
+
+    // -- DSP: Gate (per input) --
+
+    async fn set_input_gate_enabled(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        input_id: u32,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        shared.state.ensure_input_gate(input_id).enabled = enabled;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetInputGateEnabled { input_id, enabled });
+        drop(shared);
+        Self::input_dsp_changed(&emitter, input_id).await.ok();
+        Ok(())
+    }
+
+    async fn set_input_gate(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        input_id: u32,
+        threshold_db: f64,
+        attack_ms: f64,
+        release_ms: f64,
+        hold_ms: f64,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        let gate = shared.state.ensure_input_gate(input_id);
+        gate.threshold_db = threshold_db;
+        gate.attack_ms = attack_ms;
+        gate.release_ms = release_ms;
+        gate.hold_ms = hold_ms;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetInputGate {
+            input_id, threshold_db, attack_ms, release_ms, hold_ms,
+        });
+        drop(shared);
+        Self::input_dsp_changed(&emitter, input_id).await.ok();
+        Ok(())
+    }
+
+    async fn get_input_gate(&self, input_id: u32) -> zbus::fdo::Result<mixctl_core::GateInfo> {
+        let shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        let gate = shared.state.input_gate_state(input_id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(mixctl_core::GateInfo {
+            enabled: gate.enabled,
+            threshold_db: gate.threshold_db,
+            attack_ms: gate.attack_ms,
+            release_ms: gate.release_ms,
+            hold_ms: gate.hold_ms,
+        })
+    }
+
+    // -- DSP: De-esser (per input) --
+
+    async fn set_input_deesser_enabled(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        input_id: u32,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        shared.state.ensure_input_deesser(input_id).enabled = enabled;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetInputDeesserEnabled { input_id, enabled });
+        drop(shared);
+        Self::input_dsp_changed(&emitter, input_id).await.ok();
+        Ok(())
+    }
+
+    async fn set_input_deesser(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        input_id: u32,
+        frequency: f64,
+        threshold_db: f64,
+        ratio: f64,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        let ds = shared.state.ensure_input_deesser(input_id);
+        ds.frequency = frequency;
+        ds.threshold_db = threshold_db;
+        ds.ratio = ratio;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetInputDeesser {
+            input_id, frequency, threshold_db, ratio,
+        });
+        drop(shared);
+        Self::input_dsp_changed(&emitter, input_id).await.ok();
+        Ok(())
+    }
+
+    async fn get_input_deesser(&self, input_id: u32) -> zbus::fdo::Result<mixctl_core::DeesserInfo> {
+        let shared = self.inner.lock().await;
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        let ds = shared.state.input_deesser_state(input_id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(mixctl_core::DeesserInfo {
+            enabled: ds.enabled,
+            frequency: ds.frequency,
+            threshold_db: ds.threshold_db,
+            ratio: ds.ratio,
+        })
+    }
+
+    // -- DSP: Compressor (per output) --
+
+    async fn set_output_compressor_enabled(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        output_id: u32,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_output(output_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("output id {} not found", output_id)));
+        }
+        shared.state.ensure_output_compressor(output_id).enabled = enabled;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetOutputCompressorEnabled { output_id, enabled });
+        drop(shared);
+        Self::output_dsp_changed(&emitter, output_id).await.ok();
+        Ok(())
+    }
+
+    async fn set_output_compressor(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        output_id: u32,
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+        makeup_gain_db: f64,
+        knee_db: f64,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_output(output_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("output id {} not found", output_id)));
+        }
+        let comp = shared.state.ensure_output_compressor(output_id);
+        comp.threshold_db = threshold_db;
+        comp.ratio = ratio;
+        comp.attack_ms = attack_ms;
+        comp.release_ms = release_ms;
+        comp.makeup_gain_db = makeup_gain_db;
+        comp.knee_db = knee_db;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetOutputCompressor {
+            output_id, threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, knee_db,
+        });
+        drop(shared);
+        Self::output_dsp_changed(&emitter, output_id).await.ok();
+        Ok(())
+    }
+
+    async fn get_output_compressor(&self, output_id: u32) -> zbus::fdo::Result<mixctl_core::CompressorInfo> {
+        let shared = self.inner.lock().await;
+        if shared.config.find_output(output_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("output id {} not found", output_id)));
+        }
+        let comp = shared.state.output_compressor_state(output_id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(mixctl_core::CompressorInfo {
+            enabled: comp.enabled,
+            threshold_db: comp.threshold_db,
+            ratio: comp.ratio,
+            attack_ms: comp.attack_ms,
+            release_ms: comp.release_ms,
+            makeup_gain_db: comp.makeup_gain_db,
+            knee_db: comp.knee_db,
+        })
+    }
+
+    // -- DSP: Limiter (per output) --
+
+    async fn set_output_limiter_enabled(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        output_id: u32,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_output(output_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("output id {} not found", output_id)));
+        }
+        shared.state.ensure_output_limiter(output_id).enabled = enabled;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetOutputLimiterEnabled { output_id, enabled });
+        drop(shared);
+        Self::output_dsp_changed(&emitter, output_id).await.ok();
+        Ok(())
+    }
+
+    async fn set_output_limiter(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        output_id: u32,
+        ceiling_db: f64,
+        release_ms: f64,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if shared.config.find_output(output_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("output id {} not found", output_id)));
+        }
+        let lim = shared.state.ensure_output_limiter(output_id);
+        lim.ceiling_db = ceiling_db;
+        lim.release_ms = release_ms;
+        shared.state_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetOutputLimiter {
+            output_id, ceiling_db, release_ms,
+        });
+        drop(shared);
+        Self::output_dsp_changed(&emitter, output_id).await.ok();
+        Ok(())
+    }
+
+    async fn get_output_limiter(&self, output_id: u32) -> zbus::fdo::Result<mixctl_core::LimiterInfo> {
+        let shared = self.inner.lock().await;
+        if shared.config.find_output(output_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("output id {} not found", output_id)));
+        }
+        let lim = shared.state.output_limiter_state(output_id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(mixctl_core::LimiterInfo {
+            enabled: lim.enabled,
+            ceiling_db: lim.ceiling_db,
+            release_ms: lim.release_ms,
+        })
+    }
+
+    // -- DSP: Noise suppression (stub) --
+
+    async fn set_capture_noise_suppression(
+        &self,
+        _input_id: u32,
+        _enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        Err(zbus::fdo::Error::NotSupported("noise suppression not yet implemented".into()))
+    }
+
+    async fn get_capture_noise_suppression(&self, _input_id: u32) -> zbus::fdo::Result<bool> {
+        Ok(false)
+    }
+
     // -- Signals --
 
     #[zbus(signal)]
@@ -1219,6 +1698,15 @@ impl Service {
         emitter: &SignalEmitter<'_>,
         section: String,
     ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn component_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn input_dsp_changed(emitter: &SignalEmitter<'_>, input_id: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn output_dsp_changed(emitter: &SignalEmitter<'_>, output_id: u32) -> zbus::Result<()>;
 }
 
 // Public wrappers for signal emission from outside the #[interface] block.
@@ -1258,5 +1746,23 @@ impl Service {
         section: String,
     ) -> zbus::Result<()> {
         Self::config_section_changed(emitter, section).await
+    }
+
+    pub async fn emit_component_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()> {
+        Self::component_changed(emitter).await
+    }
+
+    pub async fn emit_input_dsp_changed(
+        emitter: &SignalEmitter<'_>,
+        input_id: u32,
+    ) -> zbus::Result<()> {
+        Self::input_dsp_changed(emitter, input_id).await
+    }
+
+    pub async fn emit_output_dsp_changed(
+        emitter: &SignalEmitter<'_>,
+        output_id: u32,
+    ) -> zbus::Result<()> {
+        Self::output_dsp_changed(emitter, output_id).await
     }
 }

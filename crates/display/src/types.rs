@@ -33,6 +33,8 @@ pub struct SlotView {
     pub global_muted: bool,
     /// Real-time audio level (0.0-1.0, mono peak). None when level monitoring is disabled.
     pub level: Option<f32>,
+    /// App names of audio streams currently assigned to this input.
+    pub streams: Vec<String>,
 }
 
 #[cfg(test)]
@@ -62,6 +64,7 @@ pub(crate) fn test_display_state() -> DisplayState {
                 route_muted: false,
                 global_muted: false,
                 level: None,
+                streams: vec!["Factorio".into(), "Discord".into()],
             }),
             Some(SlotView {
                 input_id: 2,
@@ -71,6 +74,7 @@ pub(crate) fn test_display_state() -> DisplayState {
                 route_muted: false,
                 global_muted: false,
                 level: None,
+                streams: vec![],
             }),
             Some(SlotView {
                 input_id: 3,
@@ -80,6 +84,7 @@ pub(crate) fn test_display_state() -> DisplayState {
                 route_muted: true,
                 global_muted: false,
                 level: None,
+                streams: vec![],
             }),
             Some(SlotView {
                 input_id: 4,
@@ -89,6 +94,7 @@ pub(crate) fn test_display_state() -> DisplayState {
                 route_muted: false,
                 global_muted: true,
                 level: None,
+                streams: vec![],
             }),
         ],
         page: 0,

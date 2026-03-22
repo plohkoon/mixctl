@@ -10,7 +10,7 @@
 
 use std::ffi::CString;
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use pipewire as pw;
@@ -21,7 +21,7 @@ pub const NUM_CHANNELS: usize = 8;
 pub const CHANNELS: [&str; NUM_CHANNELS] = ["FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"];
 
 /// Maximum number of inputs and outputs the volume matrix supports.
-const MAX_SLOTS: usize = 16;
+pub const MAX_SLOTS: usize = 16;
 
 // ---------------------------------------------------------------------------
 // VolumeMatrix
@@ -34,11 +34,6 @@ const MAX_SLOTS: usize = 16;
 pub struct VolumeMatrix {
     data: Box<[AtomicU32]>,
 }
-
-// AtomicU32 is Send+Sync, but the Box<[AtomicU32]> needs explicit impls
-// because we share it via Arc between the PW thread and the RT callback.
-unsafe impl Send for VolumeMatrix {}
-unsafe impl Sync for VolumeMatrix {}
 
 impl VolumeMatrix {
     pub fn new() -> Self {
@@ -75,15 +70,26 @@ impl VolumeMatrix {
 // ---------------------------------------------------------------------------
 
 /// Data shared with the RT process callback.
+///
+/// Port pointers are stored in fixed-size arrays with atomic counts to avoid
+/// Vec reallocation hazards. The PW main thread writes port pointers and updates
+/// counts with Release ordering; the RT process callback reads counts with
+/// Acquire ordering and accesses only indices below the count.
 struct MixerCallbackData {
     volume_matrix: Arc<VolumeMatrix>,
-    /// input_ports[input_idx][channel] = port_data pointer
-    input_ports: Vec<[*mut c_void; NUM_CHANNELS]>,
+    /// input_ports[input_idx][channel] = port_data pointer (AtomicPtr for safe cross-thread access)
+    input_ports: [[AtomicPtr<c_void>; NUM_CHANNELS]; MAX_SLOTS],
+    /// Number of active input slots
+    input_count: AtomicUsize,
     /// output_ports[output_idx][channel] = port_data pointer
-    output_ports: Vec<[*mut c_void; NUM_CHANNELS]>,
+    output_ports: [[AtomicPtr<c_void>; NUM_CHANNELS]; MAX_SLOTS],
+    /// Number of active output slots
+    output_count: AtomicUsize,
+    /// Per-channel DSP processors (EQ, gate, de-esser, compressor, limiter)
+    dsp: super::dsp::DspState,
 }
 
-// These pointers are only used within the single PW RT thread.
+// Safe: AtomicPtr and AtomicUsize are Send+Sync, Arc<VolumeMatrix> is Send+Sync.
 unsafe impl Send for MixerCallbackData {}
 
 /// Wrapper around a raw `pw_filter` acting as the central mixer node.
@@ -139,8 +145,15 @@ impl MixerFilter {
 
         let callback_data = Box::into_raw(Box::new(MixerCallbackData {
             volume_matrix,
-            input_ports: Vec::new(),
-            output_ports: Vec::new(),
+            input_ports: std::array::from_fn(|_| {
+                std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut()))
+            }),
+            input_count: AtomicUsize::new(0),
+            output_ports: std::array::from_fn(|_| {
+                std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut()))
+            }),
+            output_count: AtomicUsize::new(0),
+            dsp: super::dsp::DspState::default(),
         }));
 
         // Set up events with process callback — heap-allocated so it stays at a stable address
@@ -187,7 +200,6 @@ impl MixerFilter {
     pub fn add_input_ports(&mut self, input_id: u32) -> usize {
         let idx = self.num_inputs;
         let cb = unsafe { &mut *self.callback_data };
-        let mut ports = [std::ptr::null_mut(); NUM_CHANNELS];
 
         for (ch_idx, ch_name) in CHANNELS.iter().enumerate() {
             let port_name_c = CString::new(format!("in_{input_id}_{ch_name}")).unwrap();
@@ -215,10 +227,10 @@ impl MixerFilter {
             if port_data.is_null() {
                 warn!("failed to add input port in_{input_id}_{ch_name}");
             }
-            ports[ch_idx] = port_data;
+            cb.input_ports[idx][ch_idx].store(port_data, Ordering::Release);
         }
 
-        cb.input_ports.push(ports);
+        cb.input_count.store(idx + 1, Ordering::Release);
         self.num_inputs += 1;
         debug!("mixer: added input ports for input {input_id} (idx={idx})");
         idx
@@ -229,7 +241,6 @@ impl MixerFilter {
     pub fn add_output_ports(&mut self, output_id: u32) -> usize {
         let idx = self.num_outputs;
         let cb = unsafe { &mut *self.callback_data };
-        let mut ports = [std::ptr::null_mut(); NUM_CHANNELS];
 
         for (ch_idx, ch_name) in CHANNELS.iter().enumerate() {
             let port_name_c = CString::new(format!("out_{output_id}_{ch_name}")).unwrap();
@@ -257,10 +268,10 @@ impl MixerFilter {
             if port_data.is_null() {
                 warn!("failed to add output port out_{output_id}_{ch_name}");
             }
-            ports[ch_idx] = port_data;
+            cb.output_ports[idx][ch_idx].store(port_data, Ordering::Release);
         }
 
-        cb.output_ports.push(ports);
+        cb.output_count.store(idx + 1, Ordering::Release);
         self.num_outputs += 1;
         debug!("mixer: added output ports for output {output_id} (idx={idx})");
         idx
@@ -269,29 +280,256 @@ impl MixerFilter {
     /// Remove 8 input ports for a logical input at the given index.
     pub fn remove_input_ports(&mut self, idx: usize) {
         let cb = unsafe { &mut *self.callback_data };
-        if idx < cb.input_ports.len() {
-            let ports = cb.input_ports.remove(idx);
-            for port_data in ports {
-                if !port_data.is_null() {
-                    unsafe { pw::sys::pw_filter_remove_port(port_data); }
-                }
+        let count = cb.input_count.load(Ordering::Acquire);
+        if idx >= count {
+            return;
+        }
+
+        // Collect the port pointers at `idx` for removal, then null them out.
+        let mut removed = [std::ptr::null_mut(); NUM_CHANNELS];
+        for ch in 0..NUM_CHANNELS {
+            removed[ch] = cb.input_ports[idx][ch].swap(std::ptr::null_mut(), Ordering::Release);
+        }
+
+        // Shift remaining slots down: idx+1..count -> idx..count-1
+        for slot in idx..count - 1 {
+            for ch in 0..NUM_CHANNELS {
+                let ptr = cb.input_ports[slot + 1][ch].swap(std::ptr::null_mut(), Ordering::Release);
+                cb.input_ports[slot][ch].store(ptr, Ordering::Release);
             }
-            self.num_inputs = self.num_inputs.saturating_sub(1);
+        }
+
+        // Decrement count (RT thread will see fewer slots)
+        cb.input_count.store(count - 1, Ordering::Release);
+        self.num_inputs = self.num_inputs.saturating_sub(1);
+
+        // Now actually remove the PipeWire ports
+        for port_data in removed {
+            if !port_data.is_null() {
+                unsafe { pw::sys::pw_filter_remove_port(port_data); }
+            }
         }
     }
 
     /// Remove 8 output ports for a logical output at the given index.
     pub fn remove_output_ports(&mut self, idx: usize) {
         let cb = unsafe { &mut *self.callback_data };
-        if idx < cb.output_ports.len() {
-            let ports = cb.output_ports.remove(idx);
-            for port_data in ports {
-                if !port_data.is_null() {
-                    unsafe { pw::sys::pw_filter_remove_port(port_data); }
-                }
-            }
-            self.num_outputs = self.num_outputs.saturating_sub(1);
+        let count = cb.output_count.load(Ordering::Acquire);
+        if idx >= count {
+            return;
         }
+
+        // Collect the port pointers at `idx` for removal, then null them out.
+        let mut removed = [std::ptr::null_mut(); NUM_CHANNELS];
+        for ch in 0..NUM_CHANNELS {
+            removed[ch] = cb.output_ports[idx][ch].swap(std::ptr::null_mut(), Ordering::Release);
+        }
+
+        // Shift remaining slots down: idx+1..count -> idx..count-1
+        for slot in idx..count - 1 {
+            for ch in 0..NUM_CHANNELS {
+                let ptr = cb.output_ports[slot + 1][ch].swap(std::ptr::null_mut(), Ordering::Release);
+                cb.output_ports[slot][ch].store(ptr, Ordering::Release);
+            }
+        }
+
+        // Decrement count (RT thread will see fewer slots)
+        cb.output_count.store(count - 1, Ordering::Release);
+        self.num_outputs = self.num_outputs.saturating_sub(1);
+
+        // Now actually remove the PipeWire ports
+        for port_data in removed {
+            if !port_data.is_null() {
+                unsafe { pw::sys::pw_filter_remove_port(port_data); }
+            }
+        }
+    }
+
+    // -- DSP accessor methods --
+
+    pub fn set_input_eq_enabled(&self, idx: usize, enabled: bool) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx < MAX_SLOTS {
+            cb.dsp.input_eq[idx].enabled.store(enabled, Ordering::Release);
+        }
+    }
+
+    pub fn set_input_eq_band(
+        &self,
+        idx: usize,
+        band: usize,
+        band_type: super::dsp::EqBandType,
+        freq: f32,
+        gain_db: f32,
+        q: f32,
+        sample_rate: f32,
+    ) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx >= MAX_SLOTS || band >= super::dsp::NUM_EQ_BANDS {
+            return;
+        }
+        let coeffs = match band_type {
+            super::dsp::EqBandType::LowShelf => {
+                super::dsp::BiquadCoeffs::low_shelf(freq, gain_db, q, sample_rate)
+            }
+            super::dsp::EqBandType::Peaking => {
+                super::dsp::BiquadCoeffs::peaking(freq, gain_db, q, sample_rate)
+            }
+            super::dsp::EqBandType::HighShelf => {
+                super::dsp::BiquadCoeffs::high_shelf(freq, gain_db, q, sample_rate)
+            }
+            super::dsp::EqBandType::Bypass => super::dsp::BiquadCoeffs::default(),
+        };
+        for ch in 0..NUM_CHANNELS {
+            cb.dsp.input_eq[idx].coeffs[ch][band] = coeffs;
+            cb.dsp.input_eq[idx].state[ch][band] = super::dsp::BiquadState::default();
+        }
+    }
+
+    pub fn get_input_eq(
+        &self,
+        idx: usize,
+    ) -> Option<bool> {
+        let cb = unsafe { &*self.callback_data };
+        if idx >= MAX_SLOTS {
+            return None;
+        }
+        Some(cb.dsp.input_eq[idx].enabled.load(Ordering::Acquire))
+    }
+
+    pub fn reset_input_eq(&self, idx: usize) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx >= MAX_SLOTS {
+            return;
+        }
+        for ch in 0..NUM_CHANNELS {
+            for band in 0..super::dsp::NUM_EQ_BANDS {
+                cb.dsp.input_eq[idx].coeffs[ch][band] = super::dsp::BiquadCoeffs::default();
+                cb.dsp.input_eq[idx].state[ch][band] = super::dsp::BiquadState::default();
+            }
+        }
+    }
+
+    pub fn set_input_gate_enabled(&self, idx: usize, enabled: bool) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx < MAX_SLOTS {
+            cb.dsp.input_gate[idx].enabled.store(enabled, Ordering::Release);
+        }
+    }
+
+    pub fn set_input_gate(
+        &self,
+        idx: usize,
+        threshold_db: f64,
+        attack_ms: f64,
+        release_ms: f64,
+        hold_ms: f64,
+        sample_rate: f32,
+    ) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx >= MAX_SLOTS {
+            return;
+        }
+        cb.dsp.input_gate[idx].config.threshold_linear =
+            super::dsp::db_to_linear(threshold_db);
+        cb.dsp.input_gate[idx].config.attack_coeff =
+            super::dsp::time_constant(attack_ms, sample_rate);
+        cb.dsp.input_gate[idx].config.release_coeff =
+            super::dsp::time_constant(release_ms, sample_rate);
+        cb.dsp.input_gate[idx].config.hold_samples =
+            (hold_ms as f32 * 0.001 * sample_rate) as u32;
+    }
+
+    pub fn set_input_deesser_enabled(&self, idx: usize, enabled: bool) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx < MAX_SLOTS {
+            cb.dsp.input_deesser[idx].enabled.store(enabled, Ordering::Release);
+        }
+    }
+
+    pub fn set_input_deesser(
+        &self,
+        idx: usize,
+        freq: f32,
+        threshold_db: f64,
+        ratio: f64,
+        sample_rate: f32,
+    ) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx >= MAX_SLOTS {
+            return;
+        }
+        cb.dsp.input_deesser[idx].threshold_linear =
+            super::dsp::db_to_linear(threshold_db);
+        cb.dsp.input_deesser[idx].ratio = ratio as f32;
+        cb.dsp.input_deesser[idx].hpf_coeffs =
+            super::dsp::BiquadCoeffs::high_pass(freq, 0.7, sample_rate);
+        // Reset filter state
+        cb.dsp.input_deesser[idx].hpf_state =
+            [super::dsp::BiquadState::default(); NUM_CHANNELS];
+    }
+
+    pub fn set_output_compressor_enabled(&self, idx: usize, enabled: bool) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx < MAX_SLOTS {
+            cb.dsp.output_compressor[idx]
+                .enabled
+                .store(enabled, Ordering::Release);
+        }
+    }
+
+    pub fn set_output_compressor(
+        &self,
+        idx: usize,
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+        makeup_gain_db: f64,
+        knee_db: f64,
+        sample_rate: f32,
+    ) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx >= MAX_SLOTS {
+            return;
+        }
+        cb.dsp.output_compressor[idx].threshold_linear =
+            super::dsp::db_to_linear(threshold_db);
+        cb.dsp.output_compressor[idx].ratio = ratio as f32;
+        cb.dsp.output_compressor[idx].attack_coeff =
+            super::dsp::time_constant(attack_ms, sample_rate);
+        cb.dsp.output_compressor[idx].release_coeff =
+            super::dsp::time_constant(release_ms, sample_rate);
+        cb.dsp.output_compressor[idx].makeup_gain =
+            super::dsp::db_to_linear(makeup_gain_db);
+        cb.dsp.output_compressor[idx].knee_width =
+            super::dsp::db_to_linear(knee_db);
+    }
+
+    pub fn set_output_limiter_enabled(&self, idx: usize, enabled: bool) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx < MAX_SLOTS {
+            cb.dsp.output_limiter[idx]
+                .enabled
+                .store(enabled, Ordering::Release);
+        }
+    }
+
+    pub fn set_output_limiter(
+        &self,
+        idx: usize,
+        ceiling_db: f64,
+        release_ms: f64,
+        sample_rate: f32,
+    ) {
+        let cb = unsafe { &mut *self.callback_data };
+        if idx >= MAX_SLOTS {
+            return;
+        }
+        cb.dsp.output_limiter[idx].ceiling_linear =
+            super::dsp::db_to_linear(ceiling_db);
+        cb.dsp.output_limiter[idx].release_coeff =
+            super::dsp::time_constant(release_ms, sample_rate);
     }
 
     /// Connect the filter to the graph with RT processing enabled.
@@ -383,7 +621,9 @@ unsafe extern "C" fn mixer_process(
     position: *mut pw::spa::sys::spa_io_position,
 ) {
     unsafe {
-        let ctx = &*(data as *const MixerCallbackData);
+        // Mutable reference: DSP state needs mutation in the RT callback.
+        // Safe because the RT callback is single-threaded.
+        let ctx = &mut *(data as *mut MixerCallbackData);
         let n_samples = if position.is_null() {
             return;
         } else {
@@ -394,13 +634,14 @@ unsafe extern "C" fn mixer_process(
             return;
         }
 
-        let n_inputs = ctx.input_ports.len().min(MAX_SLOTS);
-        let n_outputs = ctx.output_ports.len().min(MAX_SLOTS);
+        let n_inputs = ctx.input_count.load(Ordering::Acquire).min(MAX_SLOTS);
+        let n_outputs = ctx.output_count.load(Ordering::Acquire).min(MAX_SLOTS);
 
         // Phase 1: Dequeue all output buffers ONCE, zero them, cache pointers.
         let mut out_ptrs = [[std::ptr::null_mut::<f32>(); NUM_CHANNELS]; MAX_SLOTS];
-        for (oidx, output_ports) in ctx.output_ports.iter().enumerate().take(MAX_SLOTS) {
-            for (ch, &port_data) in output_ports.iter().enumerate() {
+        for oidx in 0..n_outputs {
+            for ch in 0..NUM_CHANNELS {
+                let port_data = ctx.output_ports[oidx][ch].load(Ordering::Acquire);
                 if port_data.is_null() {
                     continue;
                 }
@@ -413,14 +654,28 @@ unsafe extern "C" fn mixer_process(
         }
 
         // Phase 2: Dequeue all input buffers ONCE, cache pointers.
-        let mut in_ptrs = [[std::ptr::null::<f32>(); NUM_CHANNELS]; MAX_SLOTS];
-        for (iidx, input_ports) in ctx.input_ports.iter().enumerate().take(MAX_SLOTS) {
-            for (ch, &port_data) in input_ports.iter().enumerate() {
+        let mut in_ptrs = [[std::ptr::null_mut::<f32>(); NUM_CHANNELS]; MAX_SLOTS];
+        for iidx in 0..n_inputs {
+            for ch in 0..NUM_CHANNELS {
+                let port_data = ctx.input_ports[iidx][ch].load(Ordering::Acquire);
                 if port_data.is_null() {
                     continue;
                 }
                 in_ptrs[iidx][ch] =
-                    dequeue_raw_buffer(port_data, n_samples, false) as *const f32;
+                    dequeue_raw_buffer(port_data, n_samples, false);
+            }
+        }
+
+        // Phase 2.5: Per-input DSP (EQ → Gate → De-esser) — all toggleable
+        for iidx in 0..n_inputs {
+            for ch in 0..NUM_CHANNELS {
+                let buf = in_ptrs[iidx][ch];
+                if buf.is_null() {
+                    continue;
+                }
+                super::dsp::apply_eq(&mut ctx.dsp.input_eq[iidx], ch, buf, n_samples);
+                super::dsp::apply_gate(&mut ctx.dsp.input_gate[iidx], ch, buf, n_samples);
+                super::dsp::apply_deesser(&mut ctx.dsp.input_deesser[iidx], ch, buf, n_samples);
             }
         }
 
@@ -432,7 +687,7 @@ unsafe extern "C" fn mixer_process(
                     continue;
                 }
                 for ch in 0..NUM_CHANNELS {
-                    let in_buf = in_ptrs[iidx][ch];
+                    let in_buf = in_ptrs[iidx][ch] as *const f32;
                     let out_buf = out_ptrs[oidx][ch];
                     if in_buf.is_null() || out_buf.is_null() {
                         continue;
@@ -443,6 +698,69 @@ unsafe extern "C" fn mixer_process(
                 }
             }
         }
+
+        // Phase 4: Per-output DSP (Compressor → Limiter) — all toggleable
+        for oidx in 0..n_outputs {
+            for ch in 0..NUM_CHANNELS {
+                let buf = out_ptrs[oidx][ch];
+                if buf.is_null() {
+                    continue;
+                }
+                super::dsp::apply_compressor(&mut ctx.dsp.output_compressor[oidx], ch, buf, n_samples);
+                super::dsp::apply_limiter(&mut ctx.dsp.output_limiter[oidx], ch, buf, n_samples);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_matrix_is_all_zeros() {
+        let m = VolumeMatrix::new();
+        for i in 0..MAX_SLOTS {
+            for o in 0..MAX_SLOTS {
+                assert_eq!(m.get(i, o), 0.0, "expected 0.0 at ({i}, {o})");
+            }
+        }
+    }
+
+    #[test]
+    fn set_get_origin() {
+        let m = VolumeMatrix::new();
+        m.set(0, 0, 0.75);
+        assert_eq!(m.get(0, 0), 0.75);
+    }
+
+    #[test]
+    fn set_get_max_corner() {
+        let m = VolumeMatrix::new();
+        m.set(MAX_SLOTS - 1, MAX_SLOTS - 1, 0.42);
+        assert_eq!(m.get(MAX_SLOTS - 1, MAX_SLOTS - 1), 0.42);
+    }
+
+    #[test]
+    fn out_of_bounds_get_returns_zero() {
+        let m = VolumeMatrix::new();
+        m.set(0, 0, 1.0);
+        assert_eq!(m.get(MAX_SLOTS, 0), 0.0);
+        assert_eq!(m.get(0, MAX_SLOTS), 0.0);
+        assert_eq!(m.get(MAX_SLOTS, MAX_SLOTS), 0.0);
+        assert_eq!(m.get(usize::MAX, usize::MAX), 0.0);
+    }
+
+    #[test]
+    fn out_of_bounds_set_is_noop() {
+        let m = VolumeMatrix::new();
+        // These should not panic
+        m.set(MAX_SLOTS, 0, 1.0);
+        m.set(0, MAX_SLOTS, 1.0);
+        m.set(MAX_SLOTS, MAX_SLOTS, 1.0);
+        m.set(usize::MAX, usize::MAX, 1.0);
+        // And nothing was written to valid cells
+        assert_eq!(m.get(0, 0), 0.0);
     }
 }
 

@@ -8,6 +8,12 @@ pub struct BeacnConfig {
     pub dial_sensitivity: u32,
     #[serde(default = "default_level_decay")]
     pub level_decay: f64,
+    #[serde(default = "default_display_brightness")]
+    pub display_brightness: u8,
+    #[serde(default = "default_led_brightness")]
+    pub led_brightness: u8,
+    #[serde(default)]
+    pub button_mappings: ButtonMappings,
 }
 
 impl Default for BeacnConfig {
@@ -16,9 +22,74 @@ impl Default for BeacnConfig {
             layout: default_layout(),
             dial_sensitivity: default_dial_sensitivity(),
             level_decay: default_level_decay(),
+            display_brightness: default_display_brightness(),
+            led_brightness: default_led_brightness(),
+            button_mappings: ButtonMappings::default(),
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ButtonMappings {
+    #[serde(default = "default_toggle_route_mute")]
+    pub dial1_press: ButtonAction,
+    #[serde(default = "default_toggle_route_mute")]
+    pub dial2_press: ButtonAction,
+    #[serde(default = "default_toggle_route_mute")]
+    pub dial3_press: ButtonAction,
+    #[serde(default = "default_toggle_route_mute")]
+    pub dial4_press: ButtonAction,
+    #[serde(default = "default_toggle_global_mute")]
+    pub audience1: ButtonAction,
+    #[serde(default = "default_toggle_global_mute")]
+    pub audience2: ButtonAction,
+    #[serde(default = "default_toggle_global_mute")]
+    pub audience3: ButtonAction,
+    #[serde(default = "default_toggle_global_mute")]
+    pub audience4: ButtonAction,
+    #[serde(default = "default_next_output")]
+    pub mix: ButtonAction,
+    #[serde(default = "default_page_left")]
+    pub page_left: ButtonAction,
+    #[serde(default = "default_page_right")]
+    pub page_right: ButtonAction,
+}
+
+impl Default for ButtonMappings {
+    fn default() -> Self {
+        Self {
+            dial1_press: ButtonAction::ToggleRouteMute,
+            dial2_press: ButtonAction::ToggleRouteMute,
+            dial3_press: ButtonAction::ToggleRouteMute,
+            dial4_press: ButtonAction::ToggleRouteMute,
+            audience1: ButtonAction::ToggleGlobalMute,
+            audience2: ButtonAction::ToggleGlobalMute,
+            audience3: ButtonAction::ToggleGlobalMute,
+            audience4: ButtonAction::ToggleGlobalMute,
+            mix: ButtonAction::NextOutput,
+            page_left: ButtonAction::PageLeft,
+            page_right: ButtonAction::PageRight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonAction {
+    ToggleRouteMute,
+    ToggleGlobalMute,
+    NextOutput,
+    PrevOutput,
+    PageLeft,
+    PageRight,
+    None,
+}
+
+fn default_toggle_route_mute() -> ButtonAction { ButtonAction::ToggleRouteMute }
+fn default_toggle_global_mute() -> ButtonAction { ButtonAction::ToggleGlobalMute }
+fn default_next_output() -> ButtonAction { ButtonAction::NextOutput }
+fn default_page_left() -> ButtonAction { ButtonAction::PageLeft }
+fn default_page_right() -> ButtonAction { ButtonAction::PageRight }
 
 fn default_layout() -> String {
     "column".into()
@@ -28,6 +99,12 @@ fn default_dial_sensitivity() -> u32 {
 }
 fn default_level_decay() -> f64 {
     0.8
+}
+fn default_display_brightness() -> u8 {
+    40
+}
+fn default_led_brightness() -> u8 {
+    255
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

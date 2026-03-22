@@ -1,0 +1,14 @@
+[Unit]
+Description=MixCtl BEACN Mix Create Device Daemon
+Documentation=https://github.com/greghuber/mixctl
+After=mixctl-daemon.service
+Wants=mixctl-daemon.service
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/mixctl-beacn-daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

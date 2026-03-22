@@ -58,6 +58,59 @@ pub struct PlaybackDeviceInfo {
     pub device_name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ComponentInfo {
+    pub bus_name: String,
+    pub component_type: String,
+}
+
+// ---------------------------------------------------------------------------
+// DSP types (D-Bus serializable)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct EqBandInfo {
+    pub band_type: String,
+    pub frequency: f64,
+    pub gain_db: f64,
+    pub q: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct GateInfo {
+    pub enabled: bool,
+    pub threshold_db: f64,
+    pub attack_ms: f64,
+    pub release_ms: f64,
+    pub hold_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct DeesserInfo {
+    pub enabled: bool,
+    pub frequency: f64,
+    pub threshold_db: f64,
+    pub ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct CompressorInfo {
+    pub enabled: bool,
+    pub threshold_db: f64,
+    pub ratio: f64,
+    pub attack_ms: f64,
+    pub release_ms: f64,
+    pub makeup_gain_db: f64,
+    pub knee_db: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct LimiterInfo {
+    pub enabled: bool,
+    pub ceiling_db: f64,
+    pub release_ms: f64,
+}
+
 /// Parse a "#RRGGBB" hex color string into (R, G, B) components.
 pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     let s = s.strip_prefix('#')?;

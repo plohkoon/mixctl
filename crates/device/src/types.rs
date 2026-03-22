@@ -1,4 +1,5 @@
 use mixctl_beacn_display::{DisplayLayout, DisplayState};
+use mixctl_core::config_sections::ButtonMappings;
 
 /// Commands sent from the daemon to the device thread.
 pub enum DeviceCommand {
@@ -6,6 +7,12 @@ pub enum DeviceCommand {
     UpdateState(DisplayState),
     /// Switch to a different display layout at runtime.
     ChangeLayout(Box<dyn DisplayLayout>),
+    /// Update button mappings from config.
+    SetButtonMappings(ButtonMappings),
+    /// Set display and LED brightness.
+    SetBrightness { display: u8, led: u8 },
+    /// Show a "waiting for daemon" screen on the device.
+    ShowWaiting,
     /// Shut down the device thread.
     Shutdown,
 }

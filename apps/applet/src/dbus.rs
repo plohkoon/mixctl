@@ -6,6 +6,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use tokio::task::JoinHandle;
 
 use crate::tray::{MixCtlTray, TrayMsg};
 use crate::{AppletState, OutputStripData, PopupWindow, RouteStripData, UserAction};
@@ -14,28 +15,12 @@ pub(crate) async fn run_background(
     window: slint::Weak<PopupWindow>,
     mut action_rx: tokio::sync::mpsc::UnboundedReceiver<UserAction>,
 ) {
-    let conn = match zbus::Connection::session().await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to connect to D-Bus: {e}");
-            return;
-        }
-    };
-    let proxy = MixCtlProxy::new(&conn).await.unwrap();
-
-    // Spawn ksni tray
+    // Spawn ksni tray (lives for the entire app lifetime, outside reconnection loop)
     let (tray_tx, mut tray_rx) = tokio::sync::mpsc::unbounded_channel::<TrayMsg>();
     let tray = MixCtlTray {
         msg_tx: Mutex::new(tray_tx),
     };
     let _tray_handle: ksni::Handle<MixCtlTray> = tray.spawn().await.unwrap();
-
-    // Initial state
-    let selected = Arc::new(AtomicU32::new(0));
-    send_full_update(&proxy, &window, &selected).await;
-
-    // Spawn signal listeners
-    spawn_signal_listeners(&proxy, &window, &selected);
 
     // Handle tray messages
     let w_tray = window.clone();
@@ -68,24 +53,103 @@ pub(crate) async fn run_background(
         }
     });
 
-    // Process user actions
-    while let Some(action) = action_rx.recv().await {
-        match action {
-            UserAction::SetOutputVolume { id, volume } => {
-                proxy.set_output_volume(id, volume).await.ok();
+    // Reconnection loop
+    loop {
+        // Set disconnected state
+        let w = window.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(win) = w.upgrade() {
+                win.global::<AppletState>().set_daemon_connected(false);
             }
-            UserAction::SetOutputMute { id, muted } => {
-                proxy.set_output_mute(id, muted).await.ok();
+        }).ok();
+
+        match try_connect_and_run(&window, &mut action_rx).await {
+            Ok(()) => {
+                // action_rx was closed, app is shutting down
+                break;
             }
-            UserAction::SetRouteVolume { input_id, output_id, volume } => {
-                proxy.set_route_volume(input_id, output_id, volume).await.ok();
+            Err(e) => {
+                eprintln!("Daemon connection lost: {e}");
+                let w = window.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.global::<AppletState>().set_daemon_connected(false);
+                    }
+                }).ok();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
-            UserAction::SetRouteMute { input_id, output_id, muted } => {
-                proxy.set_route_mute(input_id, output_id, muted).await.ok();
+        }
+    }
+}
+
+async fn try_connect_and_run(
+    window: &slint::Weak<PopupWindow>,
+    action_rx: &mut tokio::sync::mpsc::UnboundedReceiver<UserAction>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let conn = zbus::Connection::session().await?;
+    let proxy = MixCtlProxy::new(&conn).await?;
+
+    // Register with daemon
+    proxy.register_component("applet").await.ok();
+
+    // Mark connected
+    let w = window.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(win) = w.upgrade() {
+            win.global::<AppletState>().set_daemon_connected(true);
+        }
+    }).ok();
+
+    // Initial state
+    let selected = Arc::new(AtomicU32::new(0));
+    send_full_update(&proxy, window, &selected).await;
+
+    // Channel for disconnect sentinel
+    let (disconnect_tx, mut disconnect_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+    // Spawn signal listeners, collecting handles
+    let handles = spawn_signal_listeners(&proxy, window, &selected, disconnect_tx);
+
+    // Process user actions until disconnect or channel close
+    loop {
+        tokio::select! {
+            action = action_rx.recv() => {
+                match action {
+                    Some(action) => {
+                        match action {
+                            UserAction::SetOutputVolume { id, volume } => {
+                                proxy.set_output_volume(id, volume).await.ok();
+                            }
+                            UserAction::SetOutputMute { id, muted } => {
+                                proxy.set_output_mute(id, muted).await.ok();
+                            }
+                            UserAction::SetRouteVolume { input_id, output_id, volume } => {
+                                proxy.set_route_volume(input_id, output_id, volume).await.ok();
+                            }
+                            UserAction::SetRouteMute { input_id, output_id, muted } => {
+                                proxy.set_route_mute(input_id, output_id, muted).await.ok();
+                            }
+                            UserAction::SelectOutput { output_id } => {
+                                selected.store(output_id, Ordering::Relaxed);
+                                send_full_update(&proxy, window, &selected).await;
+                            }
+                        }
+                    }
+                    None => {
+                        // action channel closed, app is shutting down
+                        for h in handles {
+                            h.abort();
+                        }
+                        return Ok(());
+                    }
+                }
             }
-            UserAction::SelectOutput { output_id } => {
-                selected.store(output_id, Ordering::Relaxed);
-                send_full_update(&proxy, &window, &selected).await;
+            _ = disconnect_rx.recv() => {
+                // A signal stream ended — daemon disconnected
+                for h in handles {
+                    h.abort();
+                }
+                return Err("signal stream ended (daemon disconnected)".into());
             }
         }
     }
@@ -95,13 +159,20 @@ fn spawn_signal_listeners(
     proxy: &MixCtlProxy<'static>,
     window: &slint::Weak<PopupWindow>,
     selected: &Arc<AtomicU32>,
-) {
+    disconnect_tx: tokio::sync::mpsc::UnboundedSender<()>,
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::new();
+
     // Output state changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_output_state_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_output_state_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(signal) = stream.next().await {
             let args = signal.args().unwrap();
             if let Ok(out) = p.get_output(args.id).await {
@@ -114,14 +185,19 @@ fn spawn_signal_listeners(
                 }).ok();
             }
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Route changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_route_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_route_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(signal) = stream.next().await {
             let args = signal.args().unwrap();
             let sel_id = sel.load(Ordering::Relaxed);
@@ -137,29 +213,42 @@ fn spawn_signal_listeners(
                 }
             }
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Inputs config changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_inputs_config_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_inputs_config_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(_) = stream.next().await {
             send_full_update(&p, &w, &sel).await;
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Outputs config changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_outputs_config_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_outputs_config_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(_) = stream.next().await {
             send_full_update(&p, &w, &sel).await;
         }
-    });
+        disc.send(()).ok();
+    }));
+
+    handles
 }
 
 async fn send_full_update(

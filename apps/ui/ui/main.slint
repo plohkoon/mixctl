@@ -25,6 +25,8 @@ export global MixerState {
     in-out property <[StreamData]> streams;
     in-out property <int> selected-output-id;
     in-out property <bool> audio-connected;
+    in-out property <bool> daemon-connected: false;
+    in-out property <bool> beacn-connected: false;
     in-out property <int> default-input-index;
     in-out property <int> picking-stream-id: 0;
 
@@ -81,7 +83,7 @@ export component MainWindow inherits Window {
                     clicked => { MixerState.open-capture-dialog(); }
                 }
 
-                Button {
+                if MixerState.beacn-connected: Button {
                     text: "Beacn";
                     clicked => { MixerState.open-beacn-dialog(); }
                 }
@@ -181,6 +183,18 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    if !MixerState.daemon-connected: Rectangle {
+        background: #2c3e50ee;
+
+        Text {
+            text: "Waiting for daemon...";
+            color: #bbb;
+            font-size: 18px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
         }
     }
 }

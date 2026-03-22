@@ -66,8 +66,40 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Level monitoring
+    Level {
+        #[command(subcommand)]
+        cmd: LevelCmd,
+    },
+    /// List connected components
+    Component {
+        #[command(subcommand)]
+        cmd: ComponentCmd,
+    },
+    /// Playback device management
+    Playback {
+        #[command(subcommand)]
+        cmd: PlaybackCmd,
+    },
+    /// Profile management (save/load routing configurations)
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
     /// Audio status
     Status,
+}
+
+#[derive(Subcommand)]
+enum ProfileCmd {
+    /// List saved profiles
+    List,
+    /// Save current configuration as a named profile
+    Save { name: String },
+    /// Load a saved profile (restarts daemon)
+    Load { name: String },
+    /// Delete a saved profile
+    Delete { name: String },
 }
 
 #[derive(Subcommand)]
@@ -98,6 +130,21 @@ enum InputCmd {
     GetDefault,
     /// Set the default input (0 to clear)
     SetDefault { id: u32 },
+    /// Manage input EQ
+    Eq {
+        #[command(subcommand)]
+        cmd: InputEqCmd,
+    },
+    /// Manage input noise gate
+    Gate {
+        #[command(subcommand)]
+        cmd: InputGateCmd,
+    },
+    /// Manage input de-esser
+    Deesser {
+        #[command(subcommand)]
+        cmd: InputDeesserCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -122,6 +169,108 @@ enum OutputCmd {
     SetMute { id: u32, muted: String },
     /// Set an output's target hardware device (empty to clear)
     SetTarget { id: u32, device_name: String },
+    /// Manage output compressor
+    Compressor {
+        #[command(subcommand)]
+        cmd: OutputCompressorCmd,
+    },
+    /// Manage output limiter
+    Limiter {
+        #[command(subcommand)]
+        cmd: OutputLimiterCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum InputEqCmd {
+    /// Enable EQ for an input
+    Enable { id: u32 },
+    /// Disable EQ for an input
+    Disable { id: u32 },
+    /// Set an EQ band (band 0-7, band_type: peaking/low_shelf/high_shelf/bypass)
+    Set {
+        id: u32,
+        band: u8,
+        band_type: String,
+        freq: f64,
+        gain_db: f64,
+        q: f64,
+    },
+    /// Get EQ settings for an input
+    Get { id: u32 },
+    /// Reset EQ to defaults for an input
+    Reset { id: u32 },
+}
+
+#[derive(Subcommand)]
+enum InputGateCmd {
+    /// Enable gate for an input
+    Enable { id: u32 },
+    /// Disable gate for an input
+    Disable { id: u32 },
+    /// Set gate parameters
+    Set {
+        id: u32,
+        threshold_db: f64,
+        attack_ms: f64,
+        release_ms: f64,
+        hold_ms: f64,
+    },
+    /// Get gate settings for an input
+    Get { id: u32 },
+}
+
+#[derive(Subcommand)]
+enum InputDeesserCmd {
+    /// Enable de-esser for an input
+    Enable { id: u32 },
+    /// Disable de-esser for an input
+    Disable { id: u32 },
+    /// Set de-esser parameters
+    Set {
+        id: u32,
+        frequency: f64,
+        threshold_db: f64,
+        ratio: f64,
+    },
+    /// Get de-esser settings for an input
+    Get { id: u32 },
+}
+
+#[derive(Subcommand)]
+enum OutputCompressorCmd {
+    /// Enable compressor for an output
+    Enable { id: u32 },
+    /// Disable compressor for an output
+    Disable { id: u32 },
+    /// Set compressor parameters
+    Set {
+        id: u32,
+        threshold_db: f64,
+        ratio: f64,
+        attack_ms: f64,
+        release_ms: f64,
+        makeup_gain_db: f64,
+        knee_db: f64,
+    },
+    /// Get compressor settings for an output
+    Get { id: u32 },
+}
+
+#[derive(Subcommand)]
+enum OutputLimiterCmd {
+    /// Enable limiter for an output
+    Enable { id: u32 },
+    /// Disable limiter for an output
+    Disable { id: u32 },
+    /// Set limiter parameters
+    Set {
+        id: u32,
+        ceiling_db: f64,
+        release_ms: f64,
+    },
+    /// Get limiter settings for an output
+    Get { id: u32 },
 }
 
 #[derive(Subcommand)]
@@ -175,6 +324,38 @@ enum CaptureCmd {
         /// Color for the new input (#RRGGBB)
         color: String,
     },
+    /// Bind a capture device to an existing input
+    Bind { input_id: u32, device_name: String },
+    /// Remove a capture input binding
+    Remove { input_id: u32 },
+    /// Set capture volume for an input
+    SetVolume { input_id: u32, volume: f32 },
+    /// Set capture mute for an input
+    SetMute { input_id: u32, #[arg(value_parser = parse_bool)] muted: bool },
+}
+
+#[derive(Subcommand)]
+enum LevelCmd {
+    /// Get whether level broadcasting is enabled
+    Get,
+    /// Enable or disable level broadcasting
+    Set { #[arg(value_parser = parse_bool)] enabled: bool },
+    /// Get current input levels (one-shot)
+    Poll,
+    /// Watch input levels in real-time
+    Watch,
+}
+
+#[derive(Subcommand)]
+enum ComponentCmd {
+    /// List connected components
+    List,
+}
+
+#[derive(Subcommand)]
+enum PlaybackCmd {
+    /// List available playback devices
+    List,
 }
 
 #[derive(Subcommand)]
@@ -202,7 +383,21 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let conn = Connection::session().await?;
-    let proxy = MixCtlProxy::new(&conn).await?;
+    let proxy = match MixCtlProxy::new(&conn).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: could not connect to mixctl daemon ({e})");
+            eprintln!("       is mixctl-daemon running?");
+            std::process::exit(1);
+        }
+    };
+    // Verify daemon is responsive
+    if proxy.ping().await.is_err() {
+        eprintln!("error: mixctl daemon is not responding");
+        eprintln!("       is mixctl-daemon running?");
+        std::process::exit(1);
+    }
+    proxy.register_component("cli").await.ok();
 
     match args.cmd {
         Cmd::Ping => {
@@ -219,6 +414,65 @@ async fn main() -> Result<()> {
                 println!("ok");
             }
         },
+        Cmd::Profile { cmd } => {
+            let config_path = dirs::home_dir().expect("no home dir").join(".config/mixctl.toml");
+            let state_path = dirs::home_dir().expect("no home dir").join(".local/state/mixctl.toml");
+            let profiles_dir = dirs::home_dir().expect("no home dir").join(".config/mixctl/profiles");
+
+            match cmd {
+                ProfileCmd::List => {
+                    if !profiles_dir.exists() {
+                        println!("(no profiles saved)");
+                    } else {
+                        let mut found = false;
+                        for entry in std::fs::read_dir(&profiles_dir)? {
+                            let entry = entry?;
+                            if entry.path().is_dir() {
+                                println!("{}", entry.file_name().to_string_lossy());
+                                found = true;
+                            }
+                        }
+                        if !found {
+                            println!("(no profiles saved)");
+                        }
+                    }
+                }
+                ProfileCmd::Save { name } => {
+                    let profile_dir = profiles_dir.join(&name);
+                    std::fs::create_dir_all(&profile_dir)?;
+                    std::fs::copy(&config_path, profile_dir.join("config.toml"))?;
+                    if state_path.exists() {
+                        std::fs::copy(&state_path, profile_dir.join("state.toml"))?;
+                    }
+                    println!("profile '{name}' saved");
+                }
+                ProfileCmd::Load { name } => {
+                    let profile_dir = profiles_dir.join(&name);
+                    if !profile_dir.exists() {
+                        eprintln!("error: profile '{name}' not found");
+                        std::process::exit(1);
+                    }
+                    let profile_config = profile_dir.join("config.toml");
+                    let profile_state = profile_dir.join("state.toml");
+                    if profile_config.exists() {
+                        std::fs::copy(&profile_config, &config_path)?;
+                    }
+                    if profile_state.exists() {
+                        std::fs::copy(&profile_state, &state_path)?;
+                    }
+                    println!("profile '{name}' loaded — restart daemon to apply");
+                }
+                ProfileCmd::Delete { name } => {
+                    let profile_dir = profiles_dir.join(&name);
+                    if !profile_dir.exists() {
+                        eprintln!("error: profile '{name}' not found");
+                        std::process::exit(1);
+                    }
+                    std::fs::remove_dir_all(&profile_dir)?;
+                    println!("profile '{name}' deleted");
+                }
+            }
+        }
         Cmd::Status => {
             let status = proxy.get_audio_status().await?;
             println!("audio: {status}");
@@ -227,6 +481,15 @@ async fn main() -> Result<()> {
                 println!("default input: {default_input}");
             } else {
                 println!("default input: (none)");
+            }
+            let components = proxy.list_components().await?;
+            if components.is_empty() {
+                println!("components: (none)");
+            } else {
+                println!("components:");
+                for c in &components {
+                    println!("  {} ({})", c.component_type, c.bus_name);
+                }
             }
         }
         Cmd::Input { cmd } => match cmd {
@@ -274,6 +537,78 @@ async fn main() -> Result<()> {
                 proxy.set_default_input(id).await?;
                 println!("ok");
             }
+            InputCmd::Eq { cmd } => match cmd {
+                InputEqCmd::Enable { id } => {
+                    proxy.set_input_eq_enabled(id, true).await?;
+                    println!("ok");
+                }
+                InputEqCmd::Disable { id } => {
+                    proxy.set_input_eq_enabled(id, false).await?;
+                    println!("ok");
+                }
+                InputEqCmd::Set { id, band, band_type, freq, gain_db, q } => {
+                    proxy.set_input_eq_band(id, band, &band_type, freq, gain_db, q).await?;
+                    println!("ok");
+                }
+                InputEqCmd::Get { id } => {
+                    let enabled = proxy.get_input_eq_enabled(id).await?;
+                    let bands = proxy.get_input_eq(id).await?;
+                    println!("enabled: {enabled}");
+                    for (i, b) in bands.iter().enumerate() {
+                        println!(
+                            "  band {i}: type={} freq={:.1} gain={:.1}dB q={:.2}",
+                            b.band_type, b.frequency, b.gain_db, b.q
+                        );
+                    }
+                }
+                InputEqCmd::Reset { id } => {
+                    proxy.reset_input_eq(id).await?;
+                    println!("ok");
+                }
+            },
+            InputCmd::Gate { cmd } => match cmd {
+                InputGateCmd::Enable { id } => {
+                    proxy.set_input_gate_enabled(id, true).await?;
+                    println!("ok");
+                }
+                InputGateCmd::Disable { id } => {
+                    proxy.set_input_gate_enabled(id, false).await?;
+                    println!("ok");
+                }
+                InputGateCmd::Set { id, threshold_db, attack_ms, release_ms, hold_ms } => {
+                    proxy.set_input_gate(id, threshold_db, attack_ms, release_ms, hold_ms).await?;
+                    println!("ok");
+                }
+                InputGateCmd::Get { id } => {
+                    let gate = proxy.get_input_gate(id).await?;
+                    println!("enabled:      {}", gate.enabled);
+                    println!("threshold_db: {:.1}", gate.threshold_db);
+                    println!("attack_ms:    {:.1}", gate.attack_ms);
+                    println!("release_ms:   {:.1}", gate.release_ms);
+                    println!("hold_ms:      {:.1}", gate.hold_ms);
+                }
+            },
+            InputCmd::Deesser { cmd } => match cmd {
+                InputDeesserCmd::Enable { id } => {
+                    proxy.set_input_deesser_enabled(id, true).await?;
+                    println!("ok");
+                }
+                InputDeesserCmd::Disable { id } => {
+                    proxy.set_input_deesser_enabled(id, false).await?;
+                    println!("ok");
+                }
+                InputDeesserCmd::Set { id, frequency, threshold_db, ratio } => {
+                    proxy.set_input_deesser(id, frequency, threshold_db, ratio).await?;
+                    println!("ok");
+                }
+                InputDeesserCmd::Get { id } => {
+                    let ds = proxy.get_input_deesser(id).await?;
+                    println!("enabled:      {}", ds.enabled);
+                    println!("frequency:    {:.1}", ds.frequency);
+                    println!("threshold_db: {:.1}", ds.threshold_db);
+                    println!("ratio:        {:.1}", ds.ratio);
+                }
+            },
         },
         Cmd::Output { cmd } => match cmd {
             OutputCmd::List => {
@@ -328,6 +663,50 @@ async fn main() -> Result<()> {
                 proxy.set_output_target(id, &device_name).await?;
                 println!("ok");
             }
+            OutputCmd::Compressor { cmd } => match cmd {
+                OutputCompressorCmd::Enable { id } => {
+                    proxy.set_output_compressor_enabled(id, true).await?;
+                    println!("ok");
+                }
+                OutputCompressorCmd::Disable { id } => {
+                    proxy.set_output_compressor_enabled(id, false).await?;
+                    println!("ok");
+                }
+                OutputCompressorCmd::Set { id, threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, knee_db } => {
+                    proxy.set_output_compressor(id, threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, knee_db).await?;
+                    println!("ok");
+                }
+                OutputCompressorCmd::Get { id } => {
+                    let comp = proxy.get_output_compressor(id).await?;
+                    println!("enabled:        {}", comp.enabled);
+                    println!("threshold_db:   {:.1}", comp.threshold_db);
+                    println!("ratio:          {:.1}", comp.ratio);
+                    println!("attack_ms:      {:.1}", comp.attack_ms);
+                    println!("release_ms:     {:.1}", comp.release_ms);
+                    println!("makeup_gain_db: {:.1}", comp.makeup_gain_db);
+                    println!("knee_db:        {:.1}", comp.knee_db);
+                }
+            },
+            OutputCmd::Limiter { cmd } => match cmd {
+                OutputLimiterCmd::Enable { id } => {
+                    proxy.set_output_limiter_enabled(id, true).await?;
+                    println!("ok");
+                }
+                OutputLimiterCmd::Disable { id } => {
+                    proxy.set_output_limiter_enabled(id, false).await?;
+                    println!("ok");
+                }
+                OutputLimiterCmd::Set { id, ceiling_db, release_ms } => {
+                    proxy.set_output_limiter(id, ceiling_db, release_ms).await?;
+                    println!("ok");
+                }
+                OutputLimiterCmd::Get { id } => {
+                    let lim = proxy.get_output_limiter(id).await?;
+                    println!("enabled:    {}", lim.enabled);
+                    println!("ceiling_db: {:.1}", lim.ceiling_db);
+                    println!("release_ms: {:.1}", lim.release_ms);
+                }
+            },
         },
         Cmd::Route { cmd } => match cmd {
             RouteCmd::Get { input_id, output_id } => {
@@ -432,6 +811,79 @@ async fn main() -> Result<()> {
             } => {
                 let id = proxy.add_capture_input(pw_node_id, &name, &color).await?;
                 println!("ok (id={})", id);
+            }
+            CaptureCmd::Bind { input_id, device_name } => {
+                proxy.bind_capture_to_input(input_id, &device_name).await?;
+                println!("ok");
+            }
+            CaptureCmd::Remove { input_id } => {
+                proxy.remove_capture_input(input_id).await?;
+                println!("ok");
+            }
+            CaptureCmd::SetVolume { input_id, volume } => {
+                proxy.set_capture_volume(input_id, volume).await?;
+                println!("ok");
+            }
+            CaptureCmd::SetMute { input_id, muted } => {
+                proxy.set_capture_mute(input_id, muted).await?;
+                println!("ok");
+            }
+        },
+        Cmd::Level { cmd } => match cmd {
+            LevelCmd::Get => {
+                let enabled = proxy.get_broadcast_levels().await?;
+                println!("{enabled}");
+            }
+            LevelCmd::Set { enabled } => {
+                proxy.set_broadcast_levels(enabled).await?;
+                println!("ok");
+            }
+            LevelCmd::Poll => {
+                let levels = proxy.get_input_levels().await?;
+                if levels.is_empty() {
+                    println!("(no levels — is broadcasting enabled?)");
+                } else {
+                    for (id, level) in levels {
+                        println!("input {id}: {level:.4}");
+                    }
+                }
+            }
+            LevelCmd::Watch => {
+                use futures_lite::StreamExt;
+                proxy.set_broadcast_levels(true).await?;
+                let mut stream = proxy.receive_input_levels_changed().await?;
+                while let Some(signal) = stream.next().await {
+                    if let Ok(args) = signal.args() {
+                        let parts: Vec<String> = args.levels.iter()
+                            .map(|(id, lvl)| format!("{id}:{lvl:.3}"))
+                            .collect();
+                        println!("{}", parts.join(" "));
+                    }
+                }
+            }
+        },
+        Cmd::Component { cmd } => match cmd {
+            ComponentCmd::List => {
+                let components = proxy.list_components().await?;
+                if components.is_empty() {
+                    println!("(no components connected)");
+                } else {
+                    for c in components {
+                        println!("{} ({})", c.component_type, c.bus_name);
+                    }
+                }
+            }
+        },
+        Cmd::Playback { cmd } => match cmd {
+            PlaybackCmd::List => {
+                let devices = proxy.list_playback_devices().await?;
+                if devices.is_empty() {
+                    println!("(no playback devices)");
+                } else {
+                    for d in devices {
+                        println!("[{}] {} ({})", d.pw_node_id, d.name, d.device_name);
+                    }
+                }
             }
         },
         Cmd::Listen { cmd } => {

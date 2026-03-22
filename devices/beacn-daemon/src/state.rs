@@ -16,6 +16,8 @@ pub struct BeacnState {
     pub input_levels: HashMap<u32, f32>,
     /// Whether level monitoring is currently enabled
     pub levels_enabled: bool,
+    /// App names grouped by input_id
+    pub streams_by_input: HashMap<u32, Vec<String>>,
     /// Multiplier for dial delta (from config)
     pub dial_sensitivity: u32,
     /// Exponential decay factor per frame (from config)
@@ -54,6 +56,7 @@ impl BeacnState {
             routes: HashMap::new(),
             current_output_index: 0,
             current_page: 0,
+            streams_by_input: HashMap::new(),
             input_levels: HashMap::new(),
             levels_enabled: false,
             dial_sensitivity,
@@ -107,6 +110,28 @@ impl BeacnState {
             }
         }
 
+        Ok(())
+    }
+
+    /// Refresh stream assignments from the mixer daemon via D-Bus.
+    pub async fn refresh_streams(&mut self, proxy: &MixCtlProxy<'_>) -> anyhow::Result<()> {
+        let streams = proxy.list_streams().await?;
+        self.streams_by_input.clear();
+        for stream in streams {
+            // Filter out internal mixctl streams
+            if stream.app_name.contains("mixctl.") || stream.app_name.starts_with("output.") {
+                continue;
+            }
+            self.streams_by_input
+                .entry(stream.input_id)
+                .or_default()
+                .push(stream.app_name);
+        }
+        // Deduplicate (same app can have multiple PW streams)
+        for names in self.streams_by_input.values_mut() {
+            names.sort();
+            names.dedup();
+        }
         Ok(())
     }
 
@@ -208,6 +233,12 @@ impl BeacnState {
                     None
                 };
 
+                let streams = self
+                    .streams_by_input
+                    .get(&inp.id)
+                    .cloned()
+                    .unwrap_or_default();
+
                 visible_inputs[i] = Some(SlotView {
                     input_id: inp.id,
                     name: inp.name.clone(),
@@ -216,6 +247,7 @@ impl BeacnState {
                     route_muted: route.muted,
                     global_muted,
                     level,
+                    streams,
                 });
             }
         }

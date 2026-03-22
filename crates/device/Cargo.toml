@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+mixctl-core = { path = "../core" }
 mixctl-protocol = { path = "../protocol" }
 mixctl-beacn-display = { path = "../display" }
 rusb = "0.9"

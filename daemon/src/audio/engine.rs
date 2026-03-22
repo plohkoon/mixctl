@@ -198,6 +198,9 @@ fn run_pw_loop(
         metadata: None,
         _metadata_listener: None,
         deferred_default_input: config.default_input_id,
+        routing_ready: false,
+        deferred_stream_moves: Vec::new(),
+        routing_wait_start: None,
         known_stream_ids: HashSet::new(),
         known_capture_ids: HashSet::new(),
         known_playback_ids: HashSet::new(),
@@ -294,6 +297,16 @@ fn run_pw_loop(
     for cfg in &config.output_targets {
         queue_output_target_links(&state, cfg.output_id, &cfg.device_name);
     }
+    // Start routing readiness timer if we have output targets to wait for
+    {
+        let mut s = state.borrow_mut();
+        if config.output_targets.is_empty() {
+            s.routing_ready = true;
+            debug!("no output targets configured, routing immediately ready");
+        } else {
+            s.routing_wait_start = Some(Instant::now());
+        }
+    }
     for cfg in &config.capture_inputs {
         queue_capture_links(&state, cfg.input_id, &cfg.capture_device_name);
     }
@@ -362,6 +375,13 @@ struct PwState {
     metadata: Option<pw::metadata::Metadata>,
     _metadata_listener: Option<Box<dyn std::any::Any>>,
     deferred_default_input: Option<u32>,
+    /// True once all output→hardware links are active and stream routing is safe.
+    /// Prevents yanking streams off hardware sinks before the mixer chain is ready.
+    routing_ready: bool,
+    /// Streams waiting to be routed once routing_ready becomes true.
+    deferred_stream_moves: Vec<(u32, u32)>,
+    /// When we started waiting for routing readiness (for timeout).
+    routing_wait_start: Option<Instant>,
     known_stream_ids: HashSet<u32>,
     known_capture_ids: HashSet<u32>,
     known_playback_ids: HashSet<u32>,
@@ -426,6 +446,69 @@ fn try_resolve_pending_links(state: &Rc<RefCell<PwState>>) {
     for (group, link) in new_links {
         s.active_links.entry(group).or_default().push(link);
     }
+    drop(s);
+    try_activate_routing(state);
+}
+
+/// Check if all output→hardware links are resolved and activate stream routing.
+///
+/// This prevents yanking streams off hardware sinks (like USB DACs) before the
+/// full mixer chain is connected. The XMOS SDAC firmware can lock up if a stream
+/// is abruptly interrupted and restarted with different parameters.
+fn try_activate_routing(state: &Rc<RefCell<PwState>>) {
+    let mut s = state.borrow_mut();
+    if s.routing_ready {
+        return;
+    }
+    if s.metadata.is_none() {
+        return;
+    }
+
+    let has_pending_targets = s
+        .pending_links
+        .iter()
+        .any(|pl| pl.group.starts_with("output_target:"));
+
+    // Allow a 3-second timeout for targets that may never resolve (unplugged devices)
+    let timed_out = s
+        .routing_wait_start
+        .map(|t| t.elapsed() > Duration::from_secs(3))
+        .unwrap_or(false);
+
+    if has_pending_targets && !timed_out {
+        return;
+    }
+
+    if has_pending_targets {
+        warn!("output target links not fully resolved after 3s, activating routing anyway");
+    }
+
+    s.routing_ready = true;
+    info!("output chain ready, activating stream routing");
+
+    // Apply deferred default input
+    if let Some(input_id) = s.deferred_default_input.take() {
+        if let Some(metadata) = &s.metadata {
+            let target = format!("mixctl.input.{input_id}");
+            let value = format!("{{\"name\": \"{target}\"}}");
+            metadata.set_property(
+                0,
+                "default.audio.sink",
+                Some("Spa:String:JSON"),
+                Some(&value),
+            );
+            debug!("set default audio sink to input {input_id}");
+        }
+    }
+
+    // Route deferred streams
+    let deferred = std::mem::take(&mut s.deferred_stream_moves);
+    drop(s);
+
+    for (pw_node_id, input_id) in deferred {
+        debug!("routing deferred stream {pw_node_id} to input {input_id}");
+        execute_move_stream(state, pw_node_id, input_id);
+    }
 }
 
 /// Resolve a pending link to (output_port_global_id, input_port_global_id).
@@ -450,6 +533,45 @@ fn create_link_by_id(core: &CoreRc, output_port_id: u32, input_port_id: u32) -> 
             warn!("failed to create link (out_port={output_port_id}, in_port={input_port_id}): {e}");
             None
         }
+    }
+}
+
+/// Execute the MoveStream logic: remove old links, create new links, set metadata.
+fn execute_move_stream(
+    state: &Rc<RefCell<PwState>>,
+    pw_node_id: u32,
+    input_id: u32,
+) {
+    {
+        let mut s = state.borrow_mut();
+        remove_link_group(&mut s, &format!("stream:{pw_node_id}"));
+
+        if let Some(ports) = s.stream_port_cache.get(&pw_node_id) {
+            let ports_snapshot = ports.clone();
+            drop(s);
+            queue_stream_links(state, pw_node_id, input_id, &ports_snapshot);
+            try_resolve_pending_links(state);
+        } else {
+            s.pending_stream_routes.insert(pw_node_id, input_id);
+        }
+    }
+    // Metadata hint for WirePlumber
+    let s = state.borrow();
+    if let Some(metadata) = &s.metadata {
+        let target_name = format!("mixctl.input.{input_id}");
+        metadata.set_property(
+            pw_node_id,
+            "target.object",
+            Some("Spa:String:JSON"),
+            Some(&target_name),
+        );
+        let value = format!("{{\"name\": \"{target_name}\"}}");
+        metadata.set_property(
+            pw_node_id,
+            "target.node",
+            Some("Spa:String:JSON"),
+            Some(&value),
+        );
     }
 }
 
@@ -609,13 +731,14 @@ fn handle_metadata_global(
         .register();
     s._metadata_listener = Some(Box::new(listener));
 
-    if let Some(input_id) = s.deferred_default_input.take() {
-        let target = format!("mixctl.input.{input_id}");
-        let value = format!("{{\"name\": \"{target}\"}}");
-        metadata.set_property(0, "default.audio.sink", Some("Spa:String:JSON"), Some(&value));
-        debug!("set deferred default audio sink to input {input_id}");
+    // Don't apply deferred_default_input yet — wait for output→hardware links
+    // to resolve first, preventing an abrupt stream yank that can crash USB DAC firmware.
+    if s.deferred_default_input.is_some() && s.routing_wait_start.is_none() {
+        s.routing_wait_start = Some(Instant::now());
     }
     s.metadata = Some(metadata);
+    drop(s);
+    try_activate_routing(state);
 }
 
 fn handle_node_global(
@@ -884,26 +1007,13 @@ fn handle_command(
         }
 
         PwCommand::MoveStream { pw_node_id, input_id } => {
-            {
-                let mut s = state.borrow_mut();
-                remove_link_group(&mut s, &format!("stream:{pw_node_id}"));
-
-                if let Some(ports) = s.stream_port_cache.get(&pw_node_id) {
-                    let ports_snapshot = ports.clone();
-                    drop(s);
-                    queue_stream_links(state, pw_node_id, input_id, &ports_snapshot);
-                    try_resolve_pending_links(state);
-                } else {
-                    s.pending_stream_routes.insert(pw_node_id, input_id);
-                }
-            }
-            // Metadata hint for WirePlumber
-            let s = state.borrow();
-            if let Some(metadata) = &s.metadata {
-                let target_name = format!("mixctl.input.{input_id}");
-                metadata.set_property(pw_node_id, "target.object", Some("Spa:String:JSON"), Some(&target_name));
-                let value = format!("{{\"name\": \"{target_name}\"}}");
-                metadata.set_property(pw_node_id, "target.node", Some("Spa:String:JSON"), Some(&value));
+            let mut s = state.borrow_mut();
+            if !s.routing_ready {
+                debug!("deferring stream {pw_node_id} routing until output chain ready");
+                s.deferred_stream_moves.push((pw_node_id, input_id));
+            } else {
+                drop(s);
+                execute_move_stream(state, pw_node_id, input_id);
             }
         }
 
@@ -953,6 +1063,113 @@ fn handle_command(
             info!("level monitoring disabled");
         }
 
+        // -- DSP commands --
+
+        PwCommand::SetInputEqEnabled { input_id, enabled } => {
+            let s = state.borrow();
+            if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_input_eq_enabled(iidx, enabled);
+                }
+            }
+        }
+
+        PwCommand::SetInputEqBand { input_id, band, band_type, freq, gain_db, q } => {
+            let s = state.borrow();
+            if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
+                if let Some(ref mixer) = s.mixer {
+                    let bt = match band_type.as_str() {
+                        "low_shelf" => super::dsp::EqBandType::LowShelf,
+                        "high_shelf" => super::dsp::EqBandType::HighShelf,
+                        "bypass" => super::dsp::EqBandType::Bypass,
+                        _ => super::dsp::EqBandType::Peaking,
+                    };
+                    mixer.set_input_eq_band(iidx, band as usize, bt, freq as f32, gain_db as f32, q as f32, 48000.0);
+                }
+            }
+        }
+
+        PwCommand::ResetInputEq { input_id } => {
+            let s = state.borrow();
+            if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.reset_input_eq(iidx);
+                }
+            }
+        }
+
+        PwCommand::SetInputGateEnabled { input_id, enabled } => {
+            let s = state.borrow();
+            if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_input_gate_enabled(iidx, enabled);
+                }
+            }
+        }
+
+        PwCommand::SetInputGate { input_id, threshold_db, attack_ms, release_ms, hold_ms } => {
+            let s = state.borrow();
+            if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_input_gate(iidx, threshold_db, attack_ms, release_ms, hold_ms, 48000.0);
+                }
+            }
+        }
+
+        PwCommand::SetInputDeesserEnabled { input_id, enabled } => {
+            let s = state.borrow();
+            if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_input_deesser_enabled(iidx, enabled);
+                }
+            }
+        }
+
+        PwCommand::SetInputDeesser { input_id, frequency, threshold_db, ratio } => {
+            let s = state.borrow();
+            if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_input_deesser(iidx, frequency as f32, threshold_db, ratio, 48000.0);
+                }
+            }
+        }
+
+        PwCommand::SetOutputCompressorEnabled { output_id, enabled } => {
+            let s = state.borrow();
+            if let Some(&oidx) = s.output_id_to_idx.get(&output_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_output_compressor_enabled(oidx, enabled);
+                }
+            }
+        }
+
+        PwCommand::SetOutputCompressor { output_id, threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, knee_db } => {
+            let s = state.borrow();
+            if let Some(&oidx) = s.output_id_to_idx.get(&output_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_output_compressor(oidx, threshold_db, ratio, attack_ms, release_ms, makeup_gain_db, knee_db, 48000.0);
+                }
+            }
+        }
+
+        PwCommand::SetOutputLimiterEnabled { output_id, enabled } => {
+            let s = state.borrow();
+            if let Some(&oidx) = s.output_id_to_idx.get(&output_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_output_limiter_enabled(oidx, enabled);
+                }
+            }
+        }
+
+        PwCommand::SetOutputLimiter { output_id, ceiling_db, release_ms } => {
+            let s = state.borrow();
+            if let Some(&oidx) = s.output_id_to_idx.get(&output_id) {
+                if let Some(ref mixer) = s.mixer {
+                    mixer.set_output_limiter(oidx, ceiling_db, release_ms, 48000.0);
+                }
+            }
+        }
+
         PwCommand::Shutdown { original_default_sink, original_stream_targets } => {
             cleanup_before_shutdown(state, original_default_sink, &original_stream_targets);
             state.borrow_mut().shutdown = true;
@@ -971,17 +1188,40 @@ fn cleanup_before_shutdown(
     original_stream_targets: &HashMap<u32, String>,
 ) {
     let mut s = state.borrow_mut();
+
+    // Step 1: Restore original stream targets via metadata.
+    // This tells WirePlumber to move streams back to their original sinks
+    // (e.g. Spotify back to the SDAC directly).
     if let Some(metadata) = &s.metadata {
-        metadata.set_property(0, "default.audio.sink", Some("Spa:String:JSON"), original_default_sink.as_deref());
         for &stream_id in &s.known_stream_ids {
             let original = original_stream_targets.get(&stream_id);
             metadata.set_property(stream_id, "target.node", Some("Spa:String:JSON"), original.map(|s| s.as_str()));
         }
     }
-    s.active_links.clear();
-    s.pending_links.clear();
+
+    // Step 2: Remove stream links first (stream → input sinks).
+    // This releases streams so WirePlumber can reconnect them to original sinks.
+    s.active_links.retain(|k, _| !k.starts_with("stream:"));
+    s.pending_links.retain(|pl| !pl.group.starts_with("stream:"));
+
+    // Step 3: Restore the default sink AFTER streams have been released.
+    // WirePlumber will route them to the restored default.
+    if let Some(metadata) = &s.metadata {
+        metadata.set_property(0, "default.audio.sink", Some("Spa:String:JSON"), original_default_sink.as_deref());
+    }
+
+    // Step 4: Tear down the mixer chain from inside out:
+    // input→mixer links, then mixer→output links, then mixer itself.
+    s.active_links.retain(|k, _| k.starts_with("output_target:"));
+    s.pending_links.retain(|pl| pl.group.starts_with("output_target:"));
     s.mixer = None;
     s.input_sinks.clear();
+
+    // Step 5: Remove output→hardware links last.
+    // The hardware sink (SDAC) should already have streams routed directly
+    // to it by now, so removing these links doesn't interrupt its audio.
+    s.active_links.clear();
+    s.pending_links.clear();
     s.output_sources.clear();
     s.core = None;
     info!("PipeWire cleanup complete");

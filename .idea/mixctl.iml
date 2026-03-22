@@ -19,6 +19,7 @@
       <sourceFolder url="file://$MODULE_DIR$/apps/applet/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/apps/cli/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/apps/ui/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/tui/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

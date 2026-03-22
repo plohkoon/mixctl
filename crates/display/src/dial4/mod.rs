@@ -2,12 +2,13 @@ use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::{Alignment, Text, TextStyleBuilder};
 use image::{ImageBuffer, Rgb};
-use profont::{PROFONT_18_POINT, PROFONT_24_POINT};
+use profont::{PROFONT_9_POINT, PROFONT_18_POINT, PROFONT_24_POINT};
 
 use crate::layout::{DisplayLayout, Patch};
 use crate::render::{
-    self, ImageBufferTarget, encode_jpeg, BG, DIM_TEXT, DISPLAY_H, DISPLAY_W, FULL_QUALITY,
-    LEVEL_COLOR, MUTED_COLOR, PAD, PATCH_QUALITY, TAB_BAR_H, TAB_BAR_Y, TEXT_COLOR, TRACK_COLOR,
+    self, ImageBufferTarget, encode_jpeg, format_streams, BG, DIM_TEXT, DISPLAY_H, DISPLAY_W,
+    FULL_QUALITY, LEVEL_COLOR, MUTED_COLOR, PAD, PATCH_QUALITY, TAB_BAR_H, TAB_BAR_Y, TEXT_COLOR,
+    TRACK_COLOR,
 };
 use crate::types::{DisplayState, SlotView};
 
@@ -27,7 +28,8 @@ const ARC_START_RAD: f32 = std::f32::consts::PI;
 
 // Vertical centering
 const PAGE_INDICATOR_Y: u32 = DISPLAY_H - 30;
-const DIAL_CELL_H: u32 = DIAL_RADIUS * 2 + NAME_BELOW_DIAL + 24;
+const STREAMS_BELOW_NAME: u32 = 16;
+const DIAL_CELL_H: u32 = DIAL_RADIUS * 2 + NAME_BELOW_DIAL + 24 + STREAMS_BELOW_NAME;
 const AVAIL_H: u32 = PAGE_INDICATOR_Y - GRID_TOP;
 const DIAL_TOP_PAD: u32 = (AVAIL_H - DIAL_CELL_H) / 2;
 const DIAL_CY: u32 = GRID_TOP + DIAL_TOP_PAD + DIAL_RADIUS;
@@ -214,11 +216,31 @@ fn draw_dial_content(
     let _ = Text::with_text_style(&slot.name, Point::new(cx, name_y), name_style, text_style)
         .draw(&mut target);
 
+    // Stream names centered below channel name
+    let streams_text = format_streams(&slot.streams, 28);
+    if !streams_text.is_empty() {
+        let stream_style = MonoTextStyle::new(
+            &PROFONT_9_POINT,
+            embedded_graphics::pixelcolor::Rgb888::new(
+                DIM_TEXT.0[0],
+                DIM_TEXT.0[1],
+                DIM_TEXT.0[2],
+            ),
+        );
+        let _ = Text::with_text_style(
+            &streams_text,
+            Point::new(cx, name_y + STREAMS_BELOW_NAME as i32),
+            stream_style,
+            text_style,
+        )
+        .draw(&mut target);
+    }
+
     *img = target.img;
 }
 
 fn render_dial_patch(slot: &SlotView, quality: u8) -> Vec<u8> {
-    let patch_h = NAME_Y + 24 - GRID_TOP;
+    let patch_h = NAME_Y + 24 + STREAMS_BELOW_NAME - GRID_TOP;
     let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(COL_W, patch_h);
     for pixel in img.pixels_mut() {
         *pixel = BG;
@@ -294,7 +316,7 @@ impl DisplayLayout for Dial4Layout {
                         y: GRID_TOP,
                     });
                 } else {
-                    let patch_h = NAME_Y + 24 - GRID_TOP;
+                    let patch_h = NAME_Y + 24 + STREAMS_BELOW_NAME - GRID_TOP;
                     let mut blank = ImageBuffer::new(COL_W, patch_h);
                     for pixel in blank.pixels_mut() {
                         *pixel = BG;

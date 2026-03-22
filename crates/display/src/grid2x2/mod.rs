@@ -2,12 +2,13 @@ use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
 use image::{ImageBuffer, Rgb};
-use profont::PROFONT_24_POINT;
+use profont::{PROFONT_10_POINT, PROFONT_24_POINT};
 
 use crate::layout::{DisplayLayout, Patch};
 use crate::render::{
-    self, ImageBufferTarget, encode_jpeg, BG, BORDER, DIM_TEXT, DISPLAY_H, DISPLAY_W,
-    FULL_QUALITY, LEVEL_COLOR, PAD, PATCH_QUALITY, TAB_BAR_H, TAB_BAR_Y, TEXT_COLOR, TRACK_COLOR,
+    self, ImageBufferTarget, encode_jpeg, format_streams, BG, BORDER, DIM_TEXT, DISPLAY_H,
+    DISPLAY_W, FULL_QUALITY, LEVEL_COLOR, PAD, PATCH_QUALITY, TAB_BAR_H, TAB_BAR_Y, TEXT_COLOR,
+    TRACK_COLOR,
 };
 use crate::types::{DisplayState, SlotView};
 
@@ -17,7 +18,7 @@ const GRID_GAP_X: u32 = 20;
 const GRID_GAP_Y: u32 = 12;
 const CELL_W: u32 = (DISPLAY_W - 2 * PAD - GRID_GAP_X) / 2;
 const BAR_H: u32 = 60;
-const LABEL_H: u32 = 48;
+const LABEL_H: u32 = 64;
 const CELL_H: u32 = BAR_H + LABEL_H;
 const BAR_INSET: u32 = 3;
 const PAGE_INDICATOR_Y: u32 = 450;
@@ -153,6 +154,22 @@ fn draw_cell_content(
         style,
     )
     .draw(&mut target);
+
+    // Stream names below the label
+    let streams_text = format_streams(&slot.streams, 50);
+    if !streams_text.is_empty() {
+        let stream_style = MonoTextStyle::new(
+            &PROFONT_10_POINT,
+            embedded_graphics::pixelcolor::Rgb888::new(DIM_TEXT.0[0], DIM_TEXT.0[1], DIM_TEXT.0[2]),
+        );
+        let _ = Text::new(
+            &streams_text,
+            Point::new((ox + 8) as i32, (oy + BAR_H + 50) as i32),
+            stream_style,
+        )
+        .draw(&mut target);
+    }
+
     *img = target.img;
 }
 

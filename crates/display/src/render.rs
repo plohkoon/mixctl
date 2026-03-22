@@ -236,6 +236,27 @@ pub(crate) fn slot_fill_color(slot: &SlotView, brightness: f32) -> Rgb<u8> {
     }
 }
 
+// ── Waiting screen ────────────────────────────────────────────────────────
+
+/// Render a full-frame "Waiting for mixctl daemon..." screen.
+pub fn render_waiting_screen() -> Vec<u8> {
+    let mut target = ImageBufferTarget::new_with_color(DISPLAY_W, DISPLAY_H, BG);
+
+    let msg = "Waiting for daemon...";
+    let style = MonoTextStyle::new(
+        &PROFONT_24_POINT,
+        embedded_graphics::pixelcolor::Rgb888::new(DIM_TEXT.0[0], DIM_TEXT.0[1], DIM_TEXT.0[2]),
+    );
+    // Center the text
+    let char_w = PROFONT_24_POINT.character_size.width as i32;
+    let text_w = msg.len() as i32 * char_w;
+    let x = (DISPLAY_W as i32 - text_w) / 2;
+    let y = DISPLAY_H as i32 / 2;
+    let _ = Text::new(msg, Point::new(x, y), style).draw(&mut target);
+
+    encode_jpeg(&target.img, FULL_QUALITY)
+}
+
 // ── Level indicator color ──────────────────────────────────────────────────
 
 pub(crate) const LEVEL_COLOR: Rgb<u8> = Rgb([255, 255, 255]);
@@ -278,4 +299,99 @@ pub(crate) fn draw_mute_badge(
     )
     .draw(&mut target);
     *img = target.img;
+}
+
+// ── Stream name formatting ───────────────────────────────────────────────
+
+/// Format stream names for display, truncating to fit within `max_chars`.
+/// Returns empty string if no streams.
+///
+/// - Fits: `"Spotify, Discord"`
+/// - Overflow: `"Spotify +2"`
+/// - Single too long: `"VeryLongApp.."`
+pub(crate) fn format_streams(streams: &[String], max_chars: usize) -> String {
+    if streams.is_empty() || max_chars < 2 {
+        return String::new();
+    }
+
+    let joined = streams.join(", ");
+    if joined.len() <= max_chars {
+        return joined;
+    }
+
+    // Try fitting names one by one with "+N" suffix
+    let mut result = String::new();
+    let mut shown = 0usize;
+    for (i, name) in streams.iter().enumerate() {
+        let remaining = streams.len() - i - 1;
+        let suffix = if remaining > 0 {
+            format!(" +{remaining}")
+        } else {
+            String::new()
+        };
+
+        let candidate = if result.is_empty() {
+            format!("{name}{suffix}")
+        } else {
+            format!("{result}, {name}{suffix}")
+        };
+
+        if candidate.len() > max_chars && shown > 0 {
+            let more = streams.len() - shown;
+            return format!("{result} +{more}");
+        }
+
+        if result.is_empty() {
+            result = name.clone();
+        } else {
+            result = format!("{result}, {name}");
+        }
+        shown += 1;
+    }
+
+    // Single name too long — truncate
+    if result.len() > max_chars {
+        let mut truncated: String = result.chars().take(max_chars - 2).collect();
+        truncated.push_str("..");
+        return truncated;
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_streams_empty() {
+        assert_eq!(format_streams(&[], 20), "");
+    }
+
+    #[test]
+    fn format_streams_single_fits() {
+        assert_eq!(format_streams(&["Spotify".into()], 20), "Spotify");
+    }
+
+    #[test]
+    fn format_streams_multiple_fit() {
+        let names = vec!["Spotify".into(), "Discord".into()];
+        assert_eq!(format_streams(&names, 20), "Spotify, Discord");
+    }
+
+    #[test]
+    fn format_streams_overflow_shows_plus() {
+        let names: Vec<String> = vec!["Spotify".into(), "Discord".into(), "Firefox".into(), "Steam".into()];
+        let result = format_streams(&names, 20);
+        assert!(result.len() <= 20, "result too long: {result}");
+        assert!(result.contains('+'), "should have +N: {result}");
+    }
+
+    #[test]
+    fn format_streams_single_too_long() {
+        let names = vec!["VeryLongApplicationName".into()];
+        let result = format_streams(&names, 10);
+        assert!(result.len() <= 10, "result too long: {result}");
+        assert!(result.ends_with(".."), "should truncate: {result}");
+    }
 }

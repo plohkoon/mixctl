@@ -193,3 +193,159 @@ impl ConfigFile {
 fn next_unused_id(used: &HashSet<u32>) -> u32 {
     (1..).find(|id| !used.contains(id)).unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_channel(id: Option<u32>, name: &str) -> ChannelConfig {
+        ChannelConfig {
+            id,
+            name: name.into(),
+            color: "#000000".into(),
+            target_device: None,
+            capture_device: None,
+        }
+    }
+
+    #[test]
+    fn fixup_ids_duplicate_input_ids_reassigned() {
+        let mut config = ConfigFile {
+            version: 1,
+            inputs: vec![
+                make_channel(Some(1), "A"),
+                make_channel(Some(1), "B"), // duplicate
+            ],
+            outputs: vec![],
+            default_input: None,
+            app_rules: Vec::new(),
+            broadcast_levels: None,
+            beacn: Default::default(),
+            ui: Default::default(),
+            applet: Default::default(),
+            cli: Default::default(),
+        };
+        config.fixup_ids();
+
+        let id_a = config.inputs[0].id();
+        let id_b = config.inputs[1].id();
+        assert_eq!(id_a, 1);
+        assert_eq!(id_b, 2); // reassigned to next available
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn fixup_ids_zero_ids_assigned_from_one() {
+        let mut config = ConfigFile {
+            version: 1,
+            inputs: vec![
+                make_channel(Some(0), "A"),
+                make_channel(Some(0), "B"),
+            ],
+            outputs: vec![
+                make_channel(Some(0), "C"),
+            ],
+            default_input: None,
+            app_rules: Vec::new(),
+            broadcast_levels: None,
+            beacn: Default::default(),
+            ui: Default::default(),
+            applet: Default::default(),
+            cli: Default::default(),
+        };
+        config.fixup_ids();
+
+        assert_eq!(config.inputs[0].id(), 1);
+        assert_eq!(config.inputs[1].id(), 2);
+        assert_eq!(config.outputs[0].id(), 3);
+    }
+
+    #[test]
+    fn fixup_ids_preserves_valid_unique_ids_with_gaps() {
+        let mut config = ConfigFile {
+            version: 1,
+            inputs: vec![
+                make_channel(Some(3), "A"),
+                make_channel(Some(7), "B"),
+            ],
+            outputs: vec![
+                make_channel(Some(10), "C"),
+            ],
+            default_input: None,
+            app_rules: Vec::new(),
+            broadcast_levels: None,
+            beacn: Default::default(),
+            ui: Default::default(),
+            applet: Default::default(),
+            cli: Default::default(),
+        };
+        config.fixup_ids();
+
+        assert_eq!(config.inputs[0].id(), 3);
+        assert_eq!(config.inputs[1].id(), 7);
+        assert_eq!(config.outputs[0].id(), 10);
+    }
+
+    #[test]
+    fn fixup_ids_none_ids_assigned() {
+        let mut config = ConfigFile {
+            version: 1,
+            inputs: vec![
+                make_channel(None, "A"),
+                make_channel(None, "B"),
+            ],
+            outputs: vec![],
+            default_input: None,
+            app_rules: Vec::new(),
+            broadcast_levels: None,
+            beacn: Default::default(),
+            ui: Default::default(),
+            applet: Default::default(),
+            cli: Default::default(),
+        };
+        config.fixup_ids();
+
+        assert_eq!(config.inputs[0].id(), 1);
+        assert_eq!(config.inputs[1].id(), 2);
+    }
+
+    #[test]
+    fn next_unused_id_correctness() {
+        let mut used = HashSet::new();
+        assert_eq!(next_unused_id(&used), 1);
+
+        used.insert(1);
+        assert_eq!(next_unused_id(&used), 2);
+
+        used.insert(2);
+        used.insert(3);
+        assert_eq!(next_unused_id(&used), 4);
+
+        // gap: 1,2,3,5 -> next is 4
+        used.remove(&3);
+        used.insert(5);
+        assert_eq!(next_unused_id(&used), 3);
+    }
+
+    #[test]
+    fn config_next_unused_id_skips_used() {
+        let config = ConfigFile {
+            version: 1,
+            inputs: vec![
+                make_channel(Some(1), "A"),
+                make_channel(Some(2), "B"),
+            ],
+            outputs: vec![
+                make_channel(Some(3), "C"),
+            ],
+            default_input: None,
+            app_rules: Vec::new(),
+            broadcast_levels: None,
+            beacn: Default::default(),
+            ui: Default::default(),
+            applet: Default::default(),
+            cli: Default::default(),
+        };
+        assert_eq!(config.next_unused_id(), 4);
+    }
+}

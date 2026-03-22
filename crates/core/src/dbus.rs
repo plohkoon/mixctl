@@ -1,4 +1,8 @@
-use crate::{AppRuleInfo, CaptureDeviceInfo, InputInfo, OutputInfo, PlaybackDeviceInfo, RouteInfo, StreamInfo};
+use crate::{
+    AppRuleInfo, CaptureDeviceInfo, CompressorInfo, ComponentInfo, DeesserInfo,
+    EqBandInfo, GateInfo, InputInfo, LimiterInfo, OutputInfo, PlaybackDeviceInfo,
+    RouteInfo, StreamInfo,
+};
 
 pub const BUS_NAME: &str = "dev.greghuber.MixCtl";
 pub const OBJ_PATH: &str = "/dev/greghuber/MixCtl1";
@@ -58,6 +62,9 @@ pub trait MixCtl {
     fn list_capture_devices(&self) -> zbus::Result<Vec<CaptureDeviceInfo>>;
     fn add_capture_input(&self, pw_node_id: u32, name: &str, color: &str) -> zbus::Result<u32>;
     fn bind_capture_to_input(&self, input_id: u32, device_name: &str) -> zbus::Result<()>;
+    fn remove_capture_input(&self, id: u32) -> zbus::Result<()>;
+    fn set_capture_volume(&self, id: u32, volume: f32) -> zbus::Result<()>;
+    fn set_capture_mute(&self, id: u32, muted: bool) -> zbus::Result<()>;
 
     // Playback Devices
     fn list_playback_devices(&self) -> zbus::Result<Vec<PlaybackDeviceInfo>>;
@@ -74,6 +81,41 @@ pub trait MixCtl {
     fn get_broadcast_levels(&self) -> zbus::Result<bool>;
     fn set_broadcast_levels(&self, enabled: bool) -> zbus::Result<()>;
     fn get_input_levels(&self) -> zbus::Result<Vec<(u32, f64)>>;
+
+    // Component tracking
+    fn register_component(&self, component_type: &str) -> zbus::Result<()>;
+    fn list_components(&self) -> zbus::Result<Vec<ComponentInfo>>;
+
+    // DSP: EQ (per input, 8 bands)
+    fn set_input_eq_enabled(&self, input_id: u32, enabled: bool) -> zbus::Result<()>;
+    fn get_input_eq_enabled(&self, input_id: u32) -> zbus::Result<bool>;
+    fn set_input_eq_band(&self, input_id: u32, band: u8, band_type: &str, freq: f64, gain_db: f64, q: f64) -> zbus::Result<()>;
+    fn get_input_eq(&self, input_id: u32) -> zbus::Result<Vec<EqBandInfo>>;
+    fn reset_input_eq(&self, input_id: u32) -> zbus::Result<()>;
+
+    // DSP: Gate (per input)
+    fn set_input_gate_enabled(&self, input_id: u32, enabled: bool) -> zbus::Result<()>;
+    fn set_input_gate(&self, input_id: u32, threshold_db: f64, attack_ms: f64, release_ms: f64, hold_ms: f64) -> zbus::Result<()>;
+    fn get_input_gate(&self, input_id: u32) -> zbus::Result<GateInfo>;
+
+    // DSP: De-esser (per input)
+    fn set_input_deesser_enabled(&self, input_id: u32, enabled: bool) -> zbus::Result<()>;
+    fn set_input_deesser(&self, input_id: u32, frequency: f64, threshold_db: f64, ratio: f64) -> zbus::Result<()>;
+    fn get_input_deesser(&self, input_id: u32) -> zbus::Result<DeesserInfo>;
+
+    // DSP: Compressor (per output)
+    fn set_output_compressor_enabled(&self, output_id: u32, enabled: bool) -> zbus::Result<()>;
+    fn set_output_compressor(&self, output_id: u32, threshold_db: f64, ratio: f64, attack_ms: f64, release_ms: f64, makeup_gain_db: f64, knee_db: f64) -> zbus::Result<()>;
+    fn get_output_compressor(&self, output_id: u32) -> zbus::Result<CompressorInfo>;
+
+    // DSP: Limiter (per output)
+    fn set_output_limiter_enabled(&self, output_id: u32, enabled: bool) -> zbus::Result<()>;
+    fn set_output_limiter(&self, output_id: u32, ceiling_db: f64, release_ms: f64) -> zbus::Result<()>;
+    fn get_output_limiter(&self, output_id: u32) -> zbus::Result<LimiterInfo>;
+
+    // DSP: Noise suppression (per capture input)
+    fn set_capture_noise_suppression(&self, input_id: u32, enabled: bool) -> zbus::Result<()>;
+    fn get_capture_noise_suppression(&self, input_id: u32) -> zbus::Result<bool>;
 
     // Signals
     #[zbus(signal)]
@@ -114,4 +156,13 @@ pub trait MixCtl {
 
     #[zbus(signal)]
     fn config_section_changed(&self, section: String) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn component_changed(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn input_dsp_changed(&self, input_id: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn output_dsp_changed(&self, output_id: u32) -> zbus::Result<()>;
 }

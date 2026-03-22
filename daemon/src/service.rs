@@ -20,6 +20,7 @@ pub enum ServiceSignal {
     InputLevelsChanged { levels: Vec<(u32, f64)> },
     BroadcastLevelsChanged { enabled: bool },
     ConfigSectionChanged { section: String },
+    ComponentChanged,
 }
 
 impl ServiceSignal {
@@ -46,6 +47,9 @@ impl ServiceSignal {
             Self::ConfigSectionChanged { section } => {
                 Service::emit_config_section_changed(emitter, section.clone()).await.ok();
             }
+            Self::ComponentChanged => {
+                Service::emit_component_changed(emitter).await.ok();
+            }
         }
     }
 }
@@ -69,6 +73,8 @@ pub struct Shared {
     pub original_default_sink: Option<String>,
     pub original_stream_targets: HashMap<u32, String>,
     pub input_levels: HashMap<u32, f32>,
+    /// Registered components: bus_name → component_type
+    pub components: HashMap<String, String>,
 }
 
 impl Shared {
@@ -150,6 +156,7 @@ impl Service {
                 original_default_sink: None,
                 original_stream_targets: HashMap::new(),
                 input_levels: HashMap::new(),
+                components: HashMap::new(),
             })),
         }
     }
@@ -343,4 +350,79 @@ impl Service {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppRule, ChannelConfig, ConfigFile};
+    use crate::state::StateFile;
+
+    fn make_shared_for_rules(rules: Vec<AppRule>) -> Shared {
+        let (pw_tx, _pw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sig_tx, _sig_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = ConfigFile {
+            version: 1,
+            inputs: vec![ChannelConfig {
+                id: Some(1),
+                name: "Sys".into(),
+                color: "#000000".into(),
+                target_device: None,
+                capture_device: None,
+            }],
+            outputs: vec![],
+            default_input: None,
+            app_rules: rules,
+            broadcast_levels: None,
+            beacn: Default::default(),
+            ui: Default::default(),
+            applet: Default::default(),
+            cli: Default::default(),
+        };
+        Shared {
+            config,
+            state: StateFile::default(),
+            config_dirty: false,
+            state_dirty: false,
+            pw_commands: pw_tx,
+            signal_tx: sig_tx,
+            audio_connected: false,
+            active_streams: HashMap::new(),
+            capture_devices: HashMap::new(),
+            playback_devices: HashMap::new(),
+            original_default_sink: None,
+            original_stream_targets: HashMap::new(),
+            input_levels: HashMap::new(),
+            components: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn match_app_rule_exact_match() {
+        let shared = make_shared_for_rules(vec![AppRule {
+            app_name: "spotify".into(),
+            input_id: 1,
+        }]);
+        assert_eq!(shared.match_app_rule("spotify"), Some(1));
+    }
+
+    #[test]
+    fn match_app_rule_no_match_returns_none() {
+        let shared = make_shared_for_rules(vec![AppRule {
+            app_name: "spotify".into(),
+            input_id: 1,
+        }]);
+        assert_eq!(shared.match_app_rule("firefox"), None);
+    }
+
+    #[test]
+    fn match_app_rule_glob_pattern() {
+        let shared = make_shared_for_rules(vec![AppRule {
+            app_name: "fire*".into(),
+            input_id: 2,
+        }]);
+        assert_eq!(shared.match_app_rule("firefox"), Some(2));
+        assert_eq!(shared.match_app_rule("firewall"), Some(2));
+        assert_eq!(shared.match_app_rule("chrome"), None);
+    }
 }

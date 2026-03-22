@@ -4,6 +4,7 @@ use mixctl_core::{InputInfo, OutputInfo, PlaybackDeviceInfo, RouteInfo, StreamIn
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::{
     AppRuleData, BeacnDialog, CaptureDeviceData, CaptureDialog, MainWindow, MixerState,
@@ -14,14 +15,52 @@ pub(crate) async fn run_background(
     window: slint::Weak<MainWindow>,
     mut action_rx: mpsc::UnboundedReceiver<UserAction>,
 ) {
-    let conn = match zbus::Connection::session().await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to connect to D-Bus: {e}");
-            return;
+    // Reconnection loop
+    loop {
+        // Set disconnected state
+        let w = window.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(win) = w.upgrade() {
+                win.global::<MixerState>().set_daemon_connected(false);
+            }
+        }).ok();
+
+        match try_connect_and_run(&window, &mut action_rx).await {
+            Ok(()) => {
+                // action_rx was closed, app is shutting down
+                break;
+            }
+            Err(e) => {
+                eprintln!("Daemon connection lost: {e}");
+                let w = window.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(win) = w.upgrade() {
+                        win.global::<MixerState>().set_daemon_connected(false);
+                    }
+                }).ok();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
         }
-    };
-    let proxy = MixCtlProxy::new(&conn).await.unwrap();
+    }
+}
+
+async fn try_connect_and_run(
+    window: &slint::Weak<MainWindow>,
+    action_rx: &mut mpsc::UnboundedReceiver<UserAction>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let conn = zbus::Connection::session().await?;
+    let proxy = MixCtlProxy::new(&conn).await?;
+
+    // Register with daemon
+    proxy.register_component("ui").await.ok();
+
+    // Mark connected
+    let w = window.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(win) = w.upgrade() {
+            win.global::<MixerState>().set_daemon_connected(true);
+        }
+    }).ok();
 
     // Initial state
     if let Ok(status) = proxy.get_audio_status().await {
@@ -47,82 +86,119 @@ pub(crate) async fn run_background(
     let streams = proxy.list_streams().await.unwrap_or_default();
     let playback_devices = proxy.list_playback_devices().await.unwrap_or_default();
 
-    push_full_state(&window, &outputs, &inputs, &routes, &streams, &playback_devices, selected_id, default_input_id);
+    push_full_state(window, &outputs, &inputs, &routes, &streams, &playback_devices, selected_id, default_input_id);
+
+    // Initial component check for beacn
+    let components = proxy.list_components().await.unwrap_or_default();
+    let beacn_connected = components.iter().any(|c| c.component_type == "beacn");
+    {
+        let w = window.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(win) = w.upgrade() {
+                win.global::<MixerState>().set_beacn_connected(beacn_connected);
+            }
+        }).ok();
+    }
 
     // Track selected output on the tokio side
     let selected = Arc::new(std::sync::atomic::AtomicU32::new(selected_id));
 
-    // Spawn signal listeners
-    spawn_signal_listeners(&proxy, &window, &selected);
+    // Channel for disconnect sentinel
+    let (disconnect_tx, mut disconnect_rx) = mpsc::unbounded_channel::<()>();
 
-    // Process user actions
+    // Spawn signal listeners, collecting handles
+    let handles = spawn_signal_listeners(&proxy, window, &selected, disconnect_tx);
+
+    // Process user actions until disconnect or channel close
     let inputs_ref = inputs;
-    while let Some(action) = action_rx.recv().await {
-        match action {
-            UserAction::SetRouteVolume { input_id, output_id, volume } => {
-                proxy.set_route_volume(input_id, output_id, volume).await.ok();
-            }
-            UserAction::SetRouteMute { input_id, output_id, muted } => {
-                proxy.set_route_mute(input_id, output_id, muted).await.ok();
-            }
-            UserAction::SetOutputVolume { id, volume } => {
-                proxy.set_output_volume(id, volume).await.ok();
-            }
-            UserAction::SetOutputMute { id, muted } => {
-                proxy.set_output_mute(id, muted).await.ok();
-            }
-            UserAction::SelectOutput { output_id } => {
-                selected.store(output_id, std::sync::atomic::Ordering::Relaxed);
-                refresh_for_output(&proxy, &window, &inputs_ref, output_id).await;
-            }
-            UserAction::SetOutputTarget { id, device_index } => {
-                let devices = proxy.list_playback_devices().await.unwrap_or_default();
-                let device_name = if device_index == 0 {
-                    String::new() // "None" — unbind
-                } else {
-                    devices.get(device_index - 1)
-                        .map(|d| d.device_name.clone())
-                        .unwrap_or_default()
-                };
-                proxy.set_output_target(id, &device_name).await.ok();
-            }
-            UserAction::SetDefaultInput { index } => {
-                let inputs = proxy.list_inputs().await.unwrap_or_default();
-                if let Some(input) = inputs.get(index) {
-                    proxy.set_default_input(input.id).await.ok();
+    loop {
+        tokio::select! {
+            action = action_rx.recv() => {
+                match action {
+                    Some(action) => {
+                        match action {
+                            UserAction::SetRouteVolume { input_id, output_id, volume } => {
+                                proxy.set_route_volume(input_id, output_id, volume).await.ok();
+                            }
+                            UserAction::SetRouteMute { input_id, output_id, muted } => {
+                                proxy.set_route_mute(input_id, output_id, muted).await.ok();
+                            }
+                            UserAction::SetOutputVolume { id, volume } => {
+                                proxy.set_output_volume(id, volume).await.ok();
+                            }
+                            UserAction::SetOutputMute { id, muted } => {
+                                proxy.set_output_mute(id, muted).await.ok();
+                            }
+                            UserAction::SelectOutput { output_id } => {
+                                selected.store(output_id, std::sync::atomic::Ordering::Relaxed);
+                                refresh_for_output(&proxy, window, &inputs_ref, output_id).await;
+                            }
+                            UserAction::SetOutputTarget { id, device_index } => {
+                                let devices = proxy.list_playback_devices().await.unwrap_or_default();
+                                let device_name = if device_index == 0 {
+                                    String::new() // "None" -- unbind
+                                } else {
+                                    devices.get(device_index - 1)
+                                        .map(|d| d.device_name.clone())
+                                        .unwrap_or_default()
+                                };
+                                proxy.set_output_target(id, &device_name).await.ok();
+                            }
+                            UserAction::SetDefaultInput { index } => {
+                                let inputs = proxy.list_inputs().await.unwrap_or_default();
+                                if let Some(input) = inputs.get(index) {
+                                    proxy.set_default_input(input.id).await.ok();
+                                }
+                            }
+                            UserAction::AssignStream { pw_node_id, input_id, remember } => {
+                                proxy.assign_stream(pw_node_id, input_id, remember).await.ok();
+                            }
+                            UserAction::AddRule { app_name, input_index } => {
+                                let inputs = proxy.list_inputs().await.unwrap_or_default();
+                                if let Some(input) = inputs.get(input_index) {
+                                    proxy.set_app_rule(&app_name, input.id).await.ok();
+                                }
+                            }
+                            UserAction::RemoveRule { app_name } => {
+                                proxy.remove_app_rule(&app_name).await.ok();
+                            }
+                            UserAction::AddCapture { pw_node_id, name, color } => {
+                                proxy.add_capture_input(pw_node_id, &name, &color).await.ok();
+                            }
+                            UserAction::ApplyBeacn { layout, dial_sensitivity, level_decay } => {
+                                let config = serde_json::json!({
+                                    "layout": layout,
+                                    "dial_sensitivity": dial_sensitivity,
+                                    "level_decay": level_decay,
+                                });
+                                proxy.set_config_section("beacn", &config.to_string()).await.ok();
+                            }
+                            UserAction::OpenRulesDialog => {
+                                open_rules_dialog(&proxy).await;
+                            }
+                            UserAction::OpenCaptureDialog => {
+                                open_capture_dialog(&proxy).await;
+                            }
+                            UserAction::OpenBeacnDialog => {
+                                open_beacn_dialog(&proxy).await;
+                            }
+                        }
+                    }
+                    None => {
+                        // action channel closed, app is shutting down
+                        for h in handles {
+                            h.abort();
+                        }
+                        return Ok(());
+                    }
                 }
             }
-            UserAction::AssignStream { pw_node_id, input_id, remember } => {
-                proxy.assign_stream(pw_node_id, input_id, remember).await.ok();
-            }
-            UserAction::AddRule { app_name, input_index } => {
-                let inputs = proxy.list_inputs().await.unwrap_or_default();
-                if let Some(input) = inputs.get(input_index) {
-                    proxy.set_app_rule(&app_name, input.id).await.ok();
+            _ = disconnect_rx.recv() => {
+                // A signal stream ended -- daemon disconnected
+                for h in handles {
+                    h.abort();
                 }
-            }
-            UserAction::RemoveRule { app_name } => {
-                proxy.remove_app_rule(&app_name).await.ok();
-            }
-            UserAction::AddCapture { pw_node_id, name, color } => {
-                proxy.add_capture_input(pw_node_id, &name, &color).await.ok();
-            }
-            UserAction::ApplyBeacn { layout, dial_sensitivity, level_decay } => {
-                let config = serde_json::json!({
-                    "layout": layout,
-                    "dial_sensitivity": dial_sensitivity,
-                    "level_decay": level_decay,
-                });
-                proxy.set_config_section("beacn", &config.to_string()).await.ok();
-            }
-            UserAction::OpenRulesDialog => {
-                open_rules_dialog(&proxy).await;
-            }
-            UserAction::OpenCaptureDialog => {
-                open_capture_dialog(&proxy).await;
-            }
-            UserAction::OpenBeacnDialog => {
-                open_beacn_dialog(&proxy).await;
+                return Err("signal stream ended (daemon disconnected)".into());
             }
         }
     }
@@ -328,12 +404,19 @@ fn spawn_signal_listeners(
     proxy: &MixCtlProxy<'static>,
     window: &slint::Weak<MainWindow>,
     selected: &Arc<std::sync::atomic::AtomicU32>,
-) {
+    disconnect_tx: mpsc::UnboundedSender<()>,
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::new();
+
     // Audio status changed
     let p = proxy.clone();
     let w = window.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_audio_status_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_audio_status_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(_) = stream.next().await {
             if let Ok(status) = p.get_audio_status().await {
                 let connected = status == "connected";
@@ -345,14 +428,19 @@ fn spawn_signal_listeners(
                 }).ok();
             }
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Route changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_route_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_route_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(signal) = stream.next().await {
             let args = signal.args().unwrap();
             let sel_id = sel.load(std::sync::atomic::Ordering::Relaxed);
@@ -368,46 +456,66 @@ fn spawn_signal_listeners(
                 }
             }
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Output state changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_output_state_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_output_state_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(_) = stream.next().await {
             do_full_refresh(&p, &w, &sel).await;
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Inputs config changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_inputs_config_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_inputs_config_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(_) = stream.next().await {
             do_full_refresh(&p, &w, &sel).await;
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Outputs config changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_outputs_config_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_outputs_config_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(_) = stream.next().await {
             do_full_refresh(&p, &w, &sel).await;
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Streams changed
     let p = proxy.clone();
     let w = window.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_streams_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_streams_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(_) = stream.next().await {
             let inputs = p.list_inputs().await.unwrap_or_default();
             let streams = p.list_streams().await.unwrap_or_default();
@@ -418,18 +526,48 @@ fn spawn_signal_listeners(
                 }
             }).ok();
         }
-    });
+        disc.send(()).ok();
+    }));
 
     // Playback devices changed
     let p = proxy.clone();
     let w = window.clone();
     let sel = selected.clone();
-    tokio::spawn(async move {
-        let mut stream = p.receive_playback_devices_changed().await.unwrap();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_playback_devices_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
         while let Some(_) = stream.next().await {
             do_full_refresh(&p, &w, &sel).await;
         }
-    });
+        disc.send(()).ok();
+    }));
+
+    // Component changed — update beacn-connected
+    let p = proxy.clone();
+    let w = window.clone();
+    let disc = disconnect_tx.clone();
+    handles.push(tokio::spawn(async move {
+        let Ok(mut stream) = p.receive_component_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
+        while let Some(_) = stream.next().await {
+            let components = p.list_components().await.unwrap_or_default();
+            let beacn_connected = components.iter().any(|c| c.component_type == "beacn");
+            let w2 = w.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(win) = w2.upgrade() {
+                    win.global::<MixerState>().set_beacn_connected(beacn_connected);
+                }
+            }).ok();
+        }
+        disc.send(()).ok();
+    }));
+
+    handles
 }
 
 async fn do_full_refresh(

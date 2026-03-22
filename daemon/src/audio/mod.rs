@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod dsp;
 pub mod engine;
 pub mod events;
 pub mod mixer;

@@ -75,6 +75,27 @@ pub enum PwCommand {
     EnableLevelMonitoring,
     DisableLevelMonitoring,
 
+    // -- DSP: EQ (per input) --
+    SetInputEqEnabled { input_id: u32, enabled: bool },
+    SetInputEqBand { input_id: u32, band: u8, band_type: String, freq: f64, gain_db: f64, q: f64 },
+    ResetInputEq { input_id: u32 },
+
+    // -- DSP: Gate (per input) --
+    SetInputGateEnabled { input_id: u32, enabled: bool },
+    SetInputGate { input_id: u32, threshold_db: f64, attack_ms: f64, release_ms: f64, hold_ms: f64 },
+
+    // -- DSP: De-esser (per input) --
+    SetInputDeesserEnabled { input_id: u32, enabled: bool },
+    SetInputDeesser { input_id: u32, frequency: f64, threshold_db: f64, ratio: f64 },
+
+    // -- DSP: Compressor (per output) --
+    SetOutputCompressorEnabled { output_id: u32, enabled: bool },
+    SetOutputCompressor { output_id: u32, threshold_db: f64, ratio: f64, attack_ms: f64, release_ms: f64, makeup_gain_db: f64, knee_db: f64 },
+
+    // -- DSP: Limiter (per output) --
+    SetOutputLimiterEnabled { output_id: u32, enabled: bool },
+    SetOutputLimiter { output_id: u32, ceiling_db: f64, release_ms: f64 },
+
     /// Graceful shutdown of the PipeWire thread.
     Shutdown {
         original_default_sink: Option<String>,

@@ -127,6 +127,7 @@ impl FakeMixer {
                     route_muted: route.muted,
                     global_muted,
                     level,
+                    streams: vec![],
                 });
             }
         }

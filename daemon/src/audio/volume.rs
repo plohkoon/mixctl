@@ -47,4 +47,38 @@ mod tests {
         let mid = u8_to_pw_volume(50);
         assert!(mid < 0.15, "50% should be ~0.125 (cubic), got {mid}");
     }
+
+    #[test]
+    fn combine_pw_volume_both_muted_is_zero() {
+        assert_eq!(combine_pw_volume(80, true, 90, true), 0.0);
+    }
+
+    #[test]
+    fn combine_pw_volume_route_muted_is_zero() {
+        assert_eq!(combine_pw_volume(80, true, 90, false), 0.0);
+    }
+
+    #[test]
+    fn combine_pw_volume_output_muted_is_zero() {
+        assert_eq!(combine_pw_volume(80, false, 90, true), 0.0);
+    }
+
+    #[test]
+    fn combine_pw_volume_neither_muted_is_product() {
+        let result = combine_pw_volume(100, false, 100, false);
+        let expected = u8_to_pw_volume(100) * u8_to_pw_volume(100);
+        assert_eq!(result, expected);
+        assert_eq!(result, 1.0);
+
+        let result2 = combine_pw_volume(50, false, 80, false);
+        let expected2 = u8_to_pw_volume(50) * u8_to_pw_volume(80);
+        assert!((result2 - expected2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn combine_pw_volume_zero_volume_not_muted() {
+        // volume 0 but not muted -> should be 0.0 (from the cubic scaling)
+        assert_eq!(combine_pw_volume(0, false, 100, false), 0.0);
+        assert_eq!(combine_pw_volume(100, false, 0, false), 0.0);
+    }
 }

@@ -2,7 +2,7 @@ use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::Text;
 use image::{ImageBuffer, Rgb};
-use profont::{PROFONT_18_POINT, PROFONT_24_POINT};
+use profont::{PROFONT_10_POINT, PROFONT_18_POINT, PROFONT_24_POINT};
 
 use crate::layout::{DisplayLayout, Patch};
 use crate::render::{
@@ -181,6 +181,25 @@ fn draw_col_content(
     let name_x = ox + BAR_X_OFFSET + BAR_W + 6;
     let bar_bottom_y = oy + BAR_H;
     draw_rotated_text(img, &slot.name, &PROFONT_18_POINT, text_color, name_x, bar_bottom_y);
+
+    // Rotated stream names (up to 3, then "+N")
+    if !slot.streams.is_empty() {
+        let stream_x_start = name_x + 16;
+        let max_streams = 3;
+        let display_streams: Vec<&String> = slot.streams.iter().take(max_streams).collect();
+        let remaining = slot.streams.len().saturating_sub(max_streams);
+
+        for (j, stream) in display_streams.iter().enumerate() {
+            let sx = stream_x_start + j as u32 * 16;
+            draw_rotated_text(img, stream, &PROFONT_10_POINT, DIM_TEXT, sx, bar_bottom_y);
+        }
+
+        if remaining > 0 {
+            let sx = stream_x_start + display_streams.len() as u32 * 16;
+            let plus = format!("+{remaining}");
+            draw_rotated_text(img, &plus, &PROFONT_10_POINT, DIM_TEXT, sx, bar_bottom_y);
+        }
+    }
 
     // Percent below bar (right-justified under the bar)
     {

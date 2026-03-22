@@ -132,6 +132,78 @@ async fn main() -> anyhow::Result<()> {
     // Spawn the PipeWire engine on a dedicated OS thread (handles reconnection internally)
     let pw_engine = PwEngine::spawn(pw_config, shutdown_flag.clone(), pw_event_tx);
 
+    // Restore persisted DSP state by sending commands (buffered until PW channel is ready)
+    for inp in &config.inputs {
+        let id = inp.id();
+        if let Some(eq) = state.input_eq_state(id) {
+            if eq.enabled {
+                pw_cmd_tx.send(PwCommand::SetInputEqEnabled { input_id: id, enabled: true }).ok();
+            }
+            for (i, band) in eq.bands.iter().enumerate() {
+                if band.gain_db != 0.0 || band.band_type != "peaking" {
+                    pw_cmd_tx.send(PwCommand::SetInputEqBand {
+                        input_id: id,
+                        band: i as u8,
+                        band_type: band.band_type.clone(),
+                        freq: band.frequency,
+                        gain_db: band.gain_db,
+                        q: band.q,
+                    }).ok();
+                }
+            }
+        }
+        if let Some(gate) = state.input_gate_state(id) {
+            if gate.enabled {
+                pw_cmd_tx.send(PwCommand::SetInputGateEnabled { input_id: id, enabled: true }).ok();
+            }
+            pw_cmd_tx.send(PwCommand::SetInputGate {
+                input_id: id,
+                threshold_db: gate.threshold_db,
+                attack_ms: gate.attack_ms,
+                release_ms: gate.release_ms,
+                hold_ms: gate.hold_ms,
+            }).ok();
+        }
+        if let Some(ds) = state.input_deesser_state(id) {
+            if ds.enabled {
+                pw_cmd_tx.send(PwCommand::SetInputDeesserEnabled { input_id: id, enabled: true }).ok();
+            }
+            pw_cmd_tx.send(PwCommand::SetInputDeesser {
+                input_id: id,
+                frequency: ds.frequency,
+                threshold_db: ds.threshold_db,
+                ratio: ds.ratio,
+            }).ok();
+        }
+    }
+    for out in &config.outputs {
+        let id = out.id();
+        if let Some(comp) = state.output_compressor_state(id) {
+            if comp.enabled {
+                pw_cmd_tx.send(PwCommand::SetOutputCompressorEnabled { output_id: id, enabled: true }).ok();
+            }
+            pw_cmd_tx.send(PwCommand::SetOutputCompressor {
+                output_id: id,
+                threshold_db: comp.threshold_db,
+                ratio: comp.ratio,
+                attack_ms: comp.attack_ms,
+                release_ms: comp.release_ms,
+                makeup_gain_db: comp.makeup_gain_db,
+                knee_db: comp.knee_db,
+            }).ok();
+        }
+        if let Some(lim) = state.output_limiter_state(id) {
+            if lim.enabled {
+                pw_cmd_tx.send(PwCommand::SetOutputLimiterEnabled { output_id: id, enabled: true }).ok();
+            }
+            pw_cmd_tx.send(PwCommand::SetOutputLimiter {
+                output_id: id,
+                ceiling_db: lim.ceiling_db,
+                release_ms: lim.release_ms,
+            }).ok();
+        }
+    }
+
     // Relay task: forward commands from tokio mpsc to pipewire channel
     let relay_tx = pw_chan_tx.clone();
     let relay_handle = tokio::spawn(async move {
@@ -174,6 +246,41 @@ async fn main() -> anyhow::Result<()> {
         while let Some(signal) = signal_rx.recv().await {
             let emitter = iface_ref.signal_emitter();
             signal.emit(&emitter).await;
+        }
+    });
+
+    // Component cleanup task: watch for D-Bus client disconnects
+    let cleanup_svc = svc.clone();
+    let cleanup_conn = conn.clone();
+    let _cleanup_handle = tokio::spawn(async move {
+        use futures_lite::StreamExt;
+        let dbus_proxy = match zbus::fdo::DBusProxy::new(&cleanup_conn).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("failed to create DBus proxy for component tracking: {e}");
+                return;
+            }
+        };
+        let mut stream = match dbus_proxy.receive_name_owner_changed().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("failed to subscribe to NameOwnerChanged: {e}");
+                return;
+            }
+        };
+        while let Some(signal) = stream.next().await {
+            if let Ok(args) = signal.args() {
+                // Check if the departed name was a registered component
+                let new_owner: &str = args.new_owner.as_deref().unwrap_or("");
+                if new_owner.is_empty() {
+                    let name = args.name.to_string();
+                    let mut shared = cleanup_svc.inner.lock().await;
+                    if shared.components.remove(&name).is_some() {
+                        info!("component disconnected: {name}");
+                        shared.signal_tx.send(ServiceSignal::ComponentChanged).ok();
+                    }
+                }
+            }
         }
     });
 

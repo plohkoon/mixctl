@@ -38,6 +38,16 @@ pub struct StateFile {
     pub routes: HashMap<String, RouteState>,
     #[serde(default)]
     pub capture_volumes: HashMap<String, CaptureVolumeState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub input_eq: HashMap<String, InputEqDspState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub input_gate: HashMap<String, GateDspState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub input_deesser: HashMap<String, DeesserDspState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub output_compressor: HashMap<String, CompressorDspState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub output_limiter: HashMap<String, LimiterDspState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +95,132 @@ impl Default for CaptureVolumeState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DSP state types (persisted as shadow copies)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EqBandDspState {
+    pub band_type: String,
+    pub frequency: f64,
+    pub gain_db: f64,
+    pub q: f64,
+}
+
+impl Default for EqBandDspState {
+    fn default() -> Self {
+        Self {
+            band_type: "peaking".to_string(),
+            frequency: 1000.0,
+            gain_db: 0.0,
+            q: 1.4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputEqDspState {
+    pub enabled: bool,
+    pub bands: Vec<EqBandDspState>,
+}
+
+impl Default for InputEqDspState {
+    fn default() -> Self {
+        use crate::audio::dsp::DEFAULT_EQ_FREQS;
+        Self {
+            enabled: false,
+            bands: DEFAULT_EQ_FREQS.iter().map(|&freq| EqBandDspState {
+                band_type: "peaking".to_string(),
+                frequency: freq as f64,
+                gain_db: 0.0,
+                q: 1.4,
+            }).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateDspState {
+    pub enabled: bool,
+    pub threshold_db: f64,
+    pub attack_ms: f64,
+    pub release_ms: f64,
+    pub hold_ms: f64,
+}
+
+impl Default for GateDspState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_db: -40.0,
+            attack_ms: 1.0,
+            release_ms: 100.0,
+            hold_ms: 50.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeesserDspState {
+    pub enabled: bool,
+    pub frequency: f64,
+    pub threshold_db: f64,
+    pub ratio: f64,
+}
+
+impl Default for DeesserDspState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frequency: 6000.0,
+            threshold_db: -20.0,
+            ratio: 4.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompressorDspState {
+    pub enabled: bool,
+    pub threshold_db: f64,
+    pub ratio: f64,
+    pub attack_ms: f64,
+    pub release_ms: f64,
+    pub makeup_gain_db: f64,
+    pub knee_db: f64,
+}
+
+impl Default for CompressorDspState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_db: -18.0,
+            ratio: 4.0,
+            attack_ms: 5.0,
+            release_ms: 50.0,
+            makeup_gain_db: 0.0,
+            knee_db: 6.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimiterDspState {
+    pub enabled: bool,
+    pub ceiling_db: f64,
+    pub release_ms: f64,
+}
+
+impl Default for LimiterDspState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ceiling_db: -0.5,
+            release_ms: 10.0,
+        }
+    }
+}
+
 impl Default for StateFile {
     fn default() -> Self {
         Self {
@@ -93,6 +229,11 @@ impl Default for StateFile {
             outputs: HashMap::new(),
             routes: HashMap::new(),
             capture_volumes: HashMap::new(),
+            input_eq: HashMap::new(),
+            input_gate: HashMap::new(),
+            input_deesser: HashMap::new(),
+            output_compressor: HashMap::new(),
+            output_limiter: HashMap::new(),
         }
     }
 }
@@ -343,5 +484,189 @@ impl StateFile {
         self.capture_volumes
             .entry(input_id.to_string())
             .or_insert_with(CaptureVolumeState::default)
+    }
+
+    // -- DSP state accessors --
+
+    pub fn input_eq_state(&self, id: u32) -> Option<&InputEqDspState> {
+        self.input_eq.get(&id.to_string())
+    }
+
+    pub fn ensure_input_eq(&mut self, id: u32) -> &mut InputEqDspState {
+        self.input_eq
+            .entry(id.to_string())
+            .or_insert_with(InputEqDspState::default)
+    }
+
+    pub fn input_gate_state(&self, id: u32) -> Option<&GateDspState> {
+        self.input_gate.get(&id.to_string())
+    }
+
+    pub fn ensure_input_gate(&mut self, id: u32) -> &mut GateDspState {
+        self.input_gate
+            .entry(id.to_string())
+            .or_insert_with(GateDspState::default)
+    }
+
+    pub fn input_deesser_state(&self, id: u32) -> Option<&DeesserDspState> {
+        self.input_deesser.get(&id.to_string())
+    }
+
+    pub fn ensure_input_deesser(&mut self, id: u32) -> &mut DeesserDspState {
+        self.input_deesser
+            .entry(id.to_string())
+            .or_insert_with(DeesserDspState::default)
+    }
+
+    pub fn output_compressor_state(&self, id: u32) -> Option<&CompressorDspState> {
+        self.output_compressor.get(&id.to_string())
+    }
+
+    pub fn ensure_output_compressor(&mut self, id: u32) -> &mut CompressorDspState {
+        self.output_compressor
+            .entry(id.to_string())
+            .or_insert_with(CompressorDspState::default)
+    }
+
+    pub fn output_limiter_state(&self, id: u32) -> Option<&LimiterDspState> {
+        self.output_limiter.get(&id.to_string())
+    }
+
+    pub fn ensure_output_limiter(&mut self, id: u32) -> &mut LimiterDspState {
+        self.output_limiter
+            .entry(id.to_string())
+            .or_insert_with(LimiterDspState::default)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ChannelConfig, ConfigFile};
+
+    fn make_channel(id: u32, name: &str) -> ChannelConfig {
+        ChannelConfig {
+            id: Some(id),
+            name: name.into(),
+            color: "#000000".into(),
+            target_device: None,
+            capture_device: None,
+        }
+    }
+
+    fn make_config(inputs: Vec<ChannelConfig>, outputs: Vec<ChannelConfig>) -> ConfigFile {
+        ConfigFile {
+            version: 1,
+            inputs,
+            outputs,
+            default_input: None,
+            app_rules: Vec::new(),
+            broadcast_levels: None,
+            beacn: Default::default(),
+            ui: Default::default(),
+            applet: Default::default(),
+            cli: Default::default(),
+        }
+    }
+
+    #[test]
+    fn reconcile_empty_config_clears_state() {
+        let config = make_config(vec![], vec![]);
+        let mut state = StateFile::default();
+        // Pre-populate with stale data
+        state.outputs.insert("99".into(), OutputState::default());
+        state.routes.insert("99:88".into(), RouteState::default());
+
+        let changed = state.reconcile(&config);
+
+        assert!(changed);
+        assert!(state.outputs.is_empty());
+        assert!(state.routes.is_empty());
+    }
+
+    #[test]
+    fn reconcile_creates_defaults_for_new_channels() {
+        let config = make_config(
+            vec![make_channel(1, "Sys"), make_channel(2, "Game")],
+            vec![make_channel(5, "Mix1")],
+        );
+        let mut state = StateFile::default();
+
+        let changed = state.reconcile(&config);
+
+        assert!(changed);
+        // Output state created
+        assert!(state.outputs.contains_key("5"));
+        // Route states created for each input x output
+        assert!(state.routes.contains_key("1:5"));
+        assert!(state.routes.contains_key("2:5"));
+        // Defaults: volume=100, muted=false
+        let route = state.route_state(1, 5).unwrap();
+        assert_eq!(route.volume, 100);
+        assert!(!route.muted);
+    }
+
+    #[test]
+    fn reconcile_removes_stale_routes() {
+        let config = make_config(
+            vec![make_channel(1, "Sys")],
+            vec![make_channel(5, "Mix1")],
+        );
+        let mut state = StateFile::default();
+        // Pre-populate with routes for a now-removed input 2
+        state.routes.insert("2:5".into(), RouteState::default());
+        state.routes.insert("1:5".into(), RouteState::default());
+
+        let changed = state.reconcile(&config);
+
+        assert!(changed);
+        assert!(state.routes.contains_key("1:5"));
+        assert!(!state.routes.contains_key("2:5")); // stale, removed
+    }
+
+    #[test]
+    fn reconcile_removes_stale_outputs() {
+        let config = make_config(
+            vec![make_channel(1, "Sys")],
+            vec![make_channel(5, "Mix1")],
+        );
+        let mut state = StateFile::default();
+        state.outputs.insert("5".into(), OutputState::default());
+        state.outputs.insert("99".into(), OutputState::default()); // stale
+
+        state.reconcile(&config);
+
+        assert!(state.outputs.contains_key("5"));
+        assert!(!state.outputs.contains_key("99"));
+    }
+
+    #[test]
+    fn reconcile_clamps_page_when_inputs_reduced() {
+        let config = make_config(
+            vec![make_channel(1, "Sys")], // 1 input -> max_page = 0
+            vec![make_channel(5, "Mix1")],
+        );
+        let mut state = StateFile::default();
+        state.current_page = 3; // was valid before inputs were removed
+
+        let changed = state.reconcile(&config);
+
+        assert!(changed);
+        assert_eq!(state.current_page, 0);
+    }
+
+    #[test]
+    fn reconcile_no_change_returns_false() {
+        let config = make_config(
+            vec![make_channel(1, "Sys")],
+            vec![make_channel(5, "Mix1")],
+        );
+        let mut state = StateFile::default();
+        // First reconcile creates everything
+        state.reconcile(&config);
+
+        // Second reconcile should find nothing to change
+        let changed = state.reconcile(&config);
+        assert!(!changed);
     }
 }

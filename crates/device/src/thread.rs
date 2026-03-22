@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use mixctl_beacn_display::{DisplayLayout, DisplayState, Patch};
+use mixctl_core::config_sections::{ButtonAction, ButtonMappings};
 use mixctl_protocol::enums::ButtonLighting;
 use mixctl_protocol::{parse_input, Button, Color, Command, ImageChunker};
 use tracing::{error, info, warn};
@@ -124,6 +125,7 @@ fn run_inner_loop(
     let mut prev_state: Option<DisplayState> = None;
     let mut needs_full_redraw = true;
     let mut prev_button_mask: u16 = 0;
+    let mut button_mappings = ButtonMappings::default();
 
     loop {
         if shutdown_flag.load(Ordering::Acquire) {
@@ -149,6 +151,23 @@ fn run_inner_loop(
                 Ok(DeviceCommand::ChangeLayout(new_layout)) => {
                     *layout = new_layout;
                     needs_full_redraw = true;
+                }
+                Ok(DeviceCommand::SetButtonMappings(mappings)) => {
+                    button_mappings = mappings;
+                }
+                Ok(DeviceCommand::SetBrightness { display, led }) => {
+                    let _ = dev.write_command(&Command::DisplayBrightness(display).to_bytes());
+                    let _ = dev.write_command(&Command::ButtonLedBrightness(led).to_bytes());
+                }
+                Ok(DeviceCommand::ShowWaiting) => {
+                    let jpeg = mixctl_beacn_display::render::render_waiting_screen();
+                    if let Err(e) = send_full(dev, &jpeg) {
+                        return DisconnectReason::UsbError(e.to_string());
+                    }
+                    // Dim LEDs
+                    let _ = dev.write_command(&mixctl_protocol::Command::ButtonLedBrightness(30).to_bytes());
+                    current_state = None;
+                    needs_full_redraw = false;
                 }
                 Ok(DeviceCommand::Shutdown) => {
                     return DisconnectReason::CommandShutdown;
@@ -203,7 +222,7 @@ fn run_inner_loop(
                             .filter(|b| b.is_pressed(newly_pressed))
                             .copied()
                             .collect();
-                        handle_buttons(event_tx, &new_buttons, &current_state);
+                        handle_buttons(event_tx, &new_buttons, &current_state, &button_mappings);
                     }
 
                     // Handle dial events
@@ -226,6 +245,7 @@ fn handle_buttons(
     event_tx: &tokio::sync::mpsc::UnboundedSender<DeviceEvent>,
     buttons: &[Button],
     state: &Option<DisplayState>,
+    mappings: &ButtonMappings,
 ) {
     let state = match state {
         Some(s) => s,
@@ -239,18 +259,29 @@ fn handle_buttons(
         .unwrap_or(0);
 
     for button in buttons {
-        let event = match button {
-            Button::Dial1 => slot_toggle_route_mute(state, 0, current_output_id),
-            Button::Dial2 => slot_toggle_route_mute(state, 1, current_output_id),
-            Button::Dial3 => slot_toggle_route_mute(state, 2, current_output_id),
-            Button::Dial4 => slot_toggle_route_mute(state, 3, current_output_id),
-            Button::Audience1 => slot_toggle_global_mute(state, 0),
-            Button::Audience2 => slot_toggle_global_mute(state, 1),
-            Button::Audience3 => slot_toggle_global_mute(state, 2),
-            Button::Audience4 => slot_toggle_global_mute(state, 3),
-            Button::AudienceMix => Some(DeviceEvent::NextOutput),
-            Button::PageLeft => Some(DeviceEvent::PageLeft),
-            Button::PageRight => Some(DeviceEvent::PageRight),
+        // Determine which slot (0-3) this button corresponds to, and look up the action
+        let (action, slot) = match button {
+            Button::Dial1 => (&mappings.dial1_press, 0),
+            Button::Dial2 => (&mappings.dial2_press, 1),
+            Button::Dial3 => (&mappings.dial3_press, 2),
+            Button::Dial4 => (&mappings.dial4_press, 3),
+            Button::Audience1 => (&mappings.audience1, 0),
+            Button::Audience2 => (&mappings.audience2, 1),
+            Button::Audience3 => (&mappings.audience3, 2),
+            Button::Audience4 => (&mappings.audience4, 3),
+            Button::AudienceMix => (&mappings.mix, 0),
+            Button::PageLeft => (&mappings.page_left, 0),
+            Button::PageRight => (&mappings.page_right, 0),
+        };
+
+        let event = match action {
+            ButtonAction::ToggleRouteMute => slot_toggle_route_mute(state, slot, current_output_id),
+            ButtonAction::ToggleGlobalMute => slot_toggle_global_mute(state, slot),
+            ButtonAction::NextOutput => Some(DeviceEvent::NextOutput),
+            ButtonAction::PrevOutput => Some(DeviceEvent::NextOutput), // TODO: add PrevOutput event
+            ButtonAction::PageLeft => Some(DeviceEvent::PageLeft),
+            ButtonAction::PageRight => Some(DeviceEvent::PageRight),
+            ButtonAction::None => None,
         };
         if let Some(evt) = event {
             event_tx.send(evt).ok();
