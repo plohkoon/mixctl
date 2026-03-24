@@ -1,3 +1,4 @@
+mod beacn;
 mod dsp;
 mod footer;
 mod header;
@@ -37,6 +38,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Overlay::Dsp => render_overlay(frame, area, |f, a| dsp::render(f, a, state)),
         Overlay::Settings => render_overlay(frame, area, |f, a| settings::render(f, a, state)),
         Overlay::Profiles => render_overlay(frame, area, |f, a| profiles::render(f, a, state)),
+        Overlay::Beacn => render_overlay(frame, area, |f, a| beacn::render(f, a, state)),
     }
 }
 
@@ -70,6 +72,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
   D     DSP settings
   S     Channel settings
   P     Profiles
+  B     Beacn device config
   Esc   Close overlay
 
  Footer sections

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use mixctl_core::config_sections::{BeacnConfig, ButtonAction, ButtonMapping, ButtonMappings};
 use mixctl_core::dbus::MixCtlProxy;
 use zbus::Connection;
 
@@ -83,6 +84,11 @@ enum Cmd {
     },
     /// Audio status
     Status,
+    /// Manage Beacn hardware device
+    Beacn {
+        #[command(subcommand)]
+        cmd: BeacnCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -95,6 +101,58 @@ enum ProfileCmd {
     Load { name: String },
     /// Delete a saved profile
     Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum BeacnCmd {
+    /// Show full beacn config
+    Status,
+    /// List all 11 button mappings (press + hold)
+    Buttons,
+    /// Set a button's press or hold action
+    Button {
+        /// Button name (dial1-4, audience1-4, mix, page-left, page-right)
+        name: String,
+        /// Trigger type: "press" or "hold"
+        trigger: String,
+        /// Action (snake_case, e.g. toggle_route_mute, mute_output:5)
+        action: String,
+    },
+    /// Set a beacn config value
+    Set {
+        /// Config key: layout, dial-sensitivity, hold-threshold, display-brightness, led-brightness
+        key: String,
+        /// Value to set
+        value: String,
+    },
+}
+
+fn parse_button_action(s: &str) -> Result<ButtonAction, String> {
+    match s {
+        "toggle_route_mute" => Ok(ButtonAction::ToggleRouteMute),
+        "toggle_global_mute" => Ok(ButtonAction::ToggleGlobalMute),
+        "mute_all_outputs" => Ok(ButtonAction::MuteAllOutputs),
+        "toggle_eq" => Ok(ButtonAction::ToggleEq),
+        "toggle_gate" => Ok(ButtonAction::ToggleGate),
+        "toggle_deesser" => Ok(ButtonAction::ToggleDeesser),
+        "toggle_compressor" => Ok(ButtonAction::ToggleCompressor),
+        "toggle_limiter" => Ok(ButtonAction::ToggleLimiter),
+        "push_to_mute" => Ok(ButtonAction::PushToMute),
+        "push_to_talk" => Ok(ButtonAction::PushToTalk),
+        "next_output" => Ok(ButtonAction::NextOutput),
+        "prev_output" => Ok(ButtonAction::PrevOutput),
+        "page_left" => Ok(ButtonAction::PageLeft),
+        "page_right" => Ok(ButtonAction::PageRight),
+        "none" => Ok(ButtonAction::None),
+        s if s.starts_with("mute_output:") => {
+            let id: u32 = s[12..].parse().map_err(|_| "invalid output id")?;
+            Ok(ButtonAction::MuteOutput { output_id: id })
+        }
+        s if s.starts_with("load_profile:") => {
+            Ok(ButtonAction::LoadProfile { name: s[13..].to_string() })
+        }
+        _ => Err(format!("unknown action: {s}")),
+    }
 }
 
 #[derive(Subcommand)]
@@ -858,6 +916,92 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Cmd::Beacn { cmd } => {
+            let json = proxy.get_config_section("beacn").await?;
+            let mut config: BeacnConfig = serde_json::from_str(&json)
+                .map_err(|e| anyhow::anyhow!("failed to parse beacn config: {e}"))?;
+            match cmd {
+                BeacnCmd::Status => {
+                    println!("layout:             {}", config.layout);
+                    println!("dial_sensitivity:   {}", config.dial_sensitivity);
+                    println!("level_decay:        {}", config.level_decay);
+                    println!("display_brightness: {}", config.display_brightness);
+                    println!("led_brightness:     {}", config.led_brightness);
+                    println!("hold_threshold_ms:  {}", config.hold_threshold_ms);
+                    println!();
+                    println!("button mappings:");
+                    for name in ButtonMappings::BUTTON_NAMES {
+                        let mapping = config.button_mappings.get(name).unwrap();
+                        println!(
+                            "  {:<12} press={:<20} hold={}",
+                            format!("{name}:"),
+                            mapping.press.display_name(),
+                            mapping.hold.display_name()
+                        );
+                    }
+                }
+                BeacnCmd::Buttons => {
+                    for name in ButtonMappings::BUTTON_NAMES {
+                        let mapping = config.button_mappings.get(name).unwrap();
+                        println!(
+                            "{:<12} press={:<20} hold={}",
+                            format!("{name}:"),
+                            mapping.press.display_name(),
+                            mapping.hold.display_name()
+                        );
+                    }
+                }
+                BeacnCmd::Button { name, trigger, action } => {
+                    let parsed_action = parse_button_action(&action)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    let current = config.button_mappings.get(&name)
+                        .ok_or_else(|| anyhow::anyhow!("unknown button: {name}"))?
+                        .clone();
+                    let new_mapping = match trigger.as_str() {
+                        "press" => ButtonMapping { press: parsed_action, hold: current.hold },
+                        "hold" => ButtonMapping { press: current.press, hold: parsed_action },
+                        _ => return Err(anyhow::anyhow!("trigger must be 'press' or 'hold', got '{trigger}'")),
+                    };
+                    if !config.button_mappings.set(&name, new_mapping) {
+                        return Err(anyhow::anyhow!("unknown button: {name}"));
+                    }
+                    let json = serde_json::to_string(&config)?;
+                    proxy.set_config_section("beacn", &json).await?;
+                    println!("ok");
+                }
+                BeacnCmd::Set { key, value } => {
+                    match key.as_str() {
+                        "layout" => {
+                            config.layout = value;
+                        }
+                        "dial-sensitivity" => {
+                            config.dial_sensitivity = value.parse()
+                                .map_err(|_| anyhow::anyhow!("invalid dial-sensitivity: {value}"))?;
+                        }
+                        "hold-threshold" => {
+                            config.hold_threshold_ms = value.parse()
+                                .map_err(|_| anyhow::anyhow!("invalid hold-threshold: {value}"))?;
+                        }
+                        "display-brightness" => {
+                            config.display_brightness = value.parse()
+                                .map_err(|_| anyhow::anyhow!("invalid display-brightness (0-255): {value}"))?;
+                        }
+                        "led-brightness" => {
+                            config.led_brightness = value.parse()
+                                .map_err(|_| anyhow::anyhow!("invalid led-brightness (0-255): {value}"))?;
+                        }
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "unknown key: {key}\nvalid keys: layout, dial-sensitivity, hold-threshold, display-brightness, led-brightness"
+                            ));
+                        }
+                    }
+                    let json = serde_json::to_string(&config)?;
+                    proxy.set_config_section("beacn", &json).await?;
+                    println!("ok");
+                }
+            }
+        }
         Cmd::Listen { cmd } => {
             use futures_lite::StreamExt;
 

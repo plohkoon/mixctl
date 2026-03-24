@@ -256,7 +256,7 @@ async fn open_dialog(app: tauri::AppHandle, dialog: String) -> Result<(), Error>
     // For now, using sensible defaults that can be overridden later
     let (label, title, width, height, url) = match dialog.as_str() {
         "dsp" => ("dsp-dialog", "DSP", 900.0, 600.0, "/dialogs/dsp"),
-        "beacn" => ("beacn-dialog", "Beacn", 340.0, 260.0, "/dialogs/beacn"),
+        "beacn" => ("beacn-dialog", "Beacn", 520.0, 700.0, "/dialogs/beacn"),
         _ => return Err(Error::InvalidParam(format!("unknown dialog: {dialog}"))),
     };
 

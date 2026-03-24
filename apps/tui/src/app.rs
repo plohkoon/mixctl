@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use mixctl_core::config_sections::{BeacnConfig, TuiConfig};
+use mixctl_core::config_sections::{BeacnConfig, ButtonAction, ButtonMapping, ButtonMappings, TuiConfig};
 use mixctl_core::dbus::MixCtlProxy;
 use mixctl_core::{
     AppRuleInfo, CaptureDeviceInfo, CompressorInfo, ComponentInfo, DeesserInfo,
@@ -24,6 +24,7 @@ pub enum Overlay {
     Dsp,
     Settings,
     Profiles,
+    Beacn,
     Help,
 }
 
@@ -123,6 +124,15 @@ pub enum AppAction {
     ProfileNameBackspace,
     ProfileConfirmName,
     ProfileCancelName,
+    // Beacn overlay
+    OpenBeacn,
+    BeacnUp,
+    BeacnDown,
+    BeacnLeft,
+    BeacnRight,
+    BeacnToggleEdit,
+    BeacnCycleAction,
+    BeacnCycleActionBack,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +221,11 @@ pub struct AppState {
     // Profile overlay state
     pub profile_cursor: usize,
     pub profile_name_buf: Option<String>,
+
+    // Beacn overlay state
+    pub beacn_cursor: usize,
+    pub beacn_field: usize,
+    pub beacn_editing: bool,
 }
 
 impl AppState {
@@ -262,6 +277,9 @@ impl AppState {
             dsp_param_cursor: 0,
             profile_cursor: 0,
             profile_name_buf: None,
+            beacn_cursor: 0,
+            beacn_field: 0,
+            beacn_editing: false,
         }
     }
 
@@ -488,6 +506,7 @@ impl AppState {
             }
             AppAction::CloseOverlay => {
                 self.dsp_editing = false;
+                self.beacn_editing = false;
                 self.overlay = Overlay::None;
             }
 
@@ -785,6 +804,46 @@ impl AppState {
             AppAction::ProfileCancelName => {
                 self.profile_name_buf = None;
             }
+
+            // -- Beacn overlay --
+            AppAction::OpenBeacn => {
+                self.beacn_cursor = 0;
+                self.beacn_field = 0;
+                self.beacn_editing = false;
+                self.overlay = Overlay::Beacn;
+            }
+            AppAction::BeacnUp => {
+                self.beacn_cursor = self.beacn_cursor.saturating_sub(1);
+            }
+            AppAction::BeacnDown => {
+                let max = ButtonMappings::BUTTON_NAMES.len();
+                if max > 0 && self.beacn_cursor + 1 < max {
+                    self.beacn_cursor += 1;
+                }
+            }
+            AppAction::BeacnLeft => {
+                if self.beacn_field > 0 {
+                    self.beacn_field -= 1;
+                }
+            }
+            AppAction::BeacnRight => {
+                if self.beacn_field < 1 {
+                    self.beacn_field += 1;
+                }
+            }
+            AppAction::BeacnToggleEdit => {
+                self.beacn_editing = !self.beacn_editing;
+            }
+            AppAction::BeacnCycleAction => {
+                if self.beacn_editing {
+                    self.beacn_cycle_action(proxy, true).await;
+                }
+            }
+            AppAction::BeacnCycleActionBack => {
+                if self.beacn_editing {
+                    self.beacn_cycle_action(proxy, false).await;
+                }
+            }
         }
     }
 
@@ -966,6 +1025,41 @@ impl AppState {
                 }
             }
         }
+    }
+
+    async fn beacn_cycle_action(&mut self, proxy: &MixCtlProxy<'_>, forward: bool) {
+        let Some(config) = self.beacn_config.clone() else { return };
+        let Some(name) = ButtonMappings::BUTTON_NAMES.get(self.beacn_cursor) else { return };
+        let Some(mapping) = config.button_mappings.get(name) else { return };
+
+        let all = ButtonAction::ALL_SIMPLE;
+        let current = if self.beacn_field == 0 { &mapping.press } else { &mapping.hold };
+
+        // Find the current action's index in ALL_SIMPLE
+        let cur_idx = all.iter().position(|a| {
+            a.display_name() == current.display_name()
+        }).unwrap_or(0);
+
+        let next_idx = if forward {
+            (cur_idx + 1) % all.len()
+        } else {
+            (cur_idx + all.len() - 1) % all.len()
+        };
+
+        let new_action = all[next_idx].clone();
+        let new_mapping = if self.beacn_field == 0 {
+            ButtonMapping { press: new_action, hold: mapping.hold.clone() }
+        } else {
+            ButtonMapping { press: mapping.press.clone(), hold: new_action }
+        };
+
+        let mut new_config = config.clone();
+        new_config.button_mappings.set(name, new_mapping);
+
+        if let Ok(json) = serde_json::to_string(&new_config) {
+            proxy.set_config_section("beacn", &json).await.ok();
+        }
+        self.beacn_config = Some(new_config);
     }
 }
 

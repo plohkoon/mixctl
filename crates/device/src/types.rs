@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use mixctl_beacn_display::{DisplayLayout, DisplayState};
 use mixctl_core::config_sections::ButtonMappings;
 
@@ -7,8 +9,11 @@ pub enum DeviceCommand {
     UpdateState(DisplayState),
     /// Switch to a different display layout at runtime.
     ChangeLayout(Box<dyn DisplayLayout>),
-    /// Update button mappings from config.
-    SetButtonMappings(ButtonMappings),
+    /// Update button mappings and hold threshold from config.
+    SetButtonConfig {
+        mappings: ButtonMappings,
+        hold_threshold: Duration,
+    },
     /// Set display and LED brightness.
     SetBrightness { display: u8, led: u8 },
     /// Show a "waiting for daemon" screen on the device.
@@ -38,6 +43,41 @@ pub enum DeviceEvent {
     /// Toggle global mute for input on all outputs.
     ToggleGlobalMute {
         input_id: u32,
+    },
+    /// Toggle mute on a specific output.
+    ToggleOutputMute {
+        output_id: u32,
+    },
+    /// Toggle mute on all outputs.
+    ToggleAllOutputsMute,
+    /// Toggle EQ for an input.
+    ToggleEq {
+        input_id: u32,
+    },
+    /// Toggle noise gate for an input.
+    ToggleGate {
+        input_id: u32,
+    },
+    /// Toggle de-esser for an input.
+    ToggleDeesser {
+        input_id: u32,
+    },
+    /// Toggle compressor for an output.
+    ToggleCompressor {
+        output_id: u32,
+    },
+    /// Toggle limiter for an output.
+    ToggleLimiter {
+        output_id: u32,
+    },
+    /// Load a named profile.
+    LoadProfile {
+        name: String,
+    },
+    /// Explicitly set global mute state (for push-to-talk/mute release).
+    SetGlobalMute {
+        input_id: u32,
+        muted: bool,
     },
     /// Rotate to next output tab.
     NextOutput,

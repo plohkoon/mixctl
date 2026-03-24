@@ -61,18 +61,11 @@ pub async fn get_beacn_config(
 #[tauri::command]
 pub async fn set_beacn_config(
     state: State<'_, Mutex<AppState>>,
-    layout: String,
-    dial_sensitivity: u32,
-    level_decay: f64,
+    config_json: String,
 ) -> Result<(), Error> {
     let s = state.lock().await;
-    let config = serde_json::json!({
-        "layout": layout,
-        "dial_sensitivity": dial_sensitivity,
-        "level_decay": level_decay,
-    });
     Ok(s.proxy()?
-        .set_config_section("beacn", &config.to_string())
+        .set_config_section("beacn", &config_json)
         .await?)
 }
 

@@ -164,11 +164,8 @@ export const SystemApi = {
   addCaptureInput: (pwNodeId: number, name: string, color: string) =>
     invoke<number>("add_capture_input", { pwNodeId, name, color }),
   getBeacnConfig: () => invoke<string>("get_beacn_config"),
-  setBeacnConfig: (
-    layout: string,
-    dialSensitivity: number,
-    levelDecay: number
-  ) => invoke("set_beacn_config", { layout, dialSensitivity, levelDecay }),
+  setBeacnConfig: (configJson: string) =>
+    invoke("set_beacn_config", { configJson }),
   listComponents: () => invoke<ComponentInfo[]>("list_components"),
   registerComponent: (componentType: string) =>
     invoke("register_component", { componentType }),

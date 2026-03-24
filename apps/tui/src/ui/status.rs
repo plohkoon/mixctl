@@ -56,6 +56,23 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                 ])
             }
         }
+        Overlay::Beacn => {
+            if state.beacn_editing {
+                hint_spans(&[
+                    ("h/l", "cycle"),
+                    ("j/k", "nav"),
+                    ("Enter", "done"),
+                    ("Esc", "close"),
+                ])
+            } else {
+                hint_spans(&[
+                    ("j/k", "nav"),
+                    ("h/l", "field"),
+                    ("Enter", "edit"),
+                    ("Esc", "close"),
+                ])
+            }
+        }
         Overlay::Help => hint_spans(&[("?/Esc", "close"), ("q", "quit")]),
         Overlay::None => focus_hints(state.focus),
     };

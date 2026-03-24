@@ -99,7 +99,39 @@ pub fn handle_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
     }
 
     // -----------------------------------------------------------------------
-    // 7. Profiles overlay
+    // 7. Beacn overlay — editing mode
+    // -----------------------------------------------------------------------
+    if state.overlay == Overlay::Beacn && state.beacn_editing {
+        return match key.code {
+            KeyCode::Char('h') | KeyCode::Left => Some(AppAction::BeacnCycleActionBack),
+            KeyCode::Char('l') | KeyCode::Right => Some(AppAction::BeacnCycleAction),
+            KeyCode::Char('j') | KeyCode::Down => Some(AppAction::BeacnDown),
+            KeyCode::Char('k') | KeyCode::Up => Some(AppAction::BeacnUp),
+            KeyCode::Enter => Some(AppAction::BeacnToggleEdit),
+            KeyCode::Esc => Some(AppAction::CloseOverlay),
+            KeyCode::Char('q') => Some(AppAction::Quit),
+            _ => None,
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. Beacn overlay — browse mode
+    // -----------------------------------------------------------------------
+    if state.overlay == Overlay::Beacn {
+        return match key.code {
+            KeyCode::Char('j') | KeyCode::Down => Some(AppAction::BeacnDown),
+            KeyCode::Char('k') | KeyCode::Up => Some(AppAction::BeacnUp),
+            KeyCode::Char('h') | KeyCode::Left => Some(AppAction::BeacnLeft),
+            KeyCode::Char('l') | KeyCode::Right => Some(AppAction::BeacnRight),
+            KeyCode::Enter => Some(AppAction::BeacnToggleEdit),
+            KeyCode::Esc => Some(AppAction::CloseOverlay),
+            KeyCode::Char('q') => Some(AppAction::Quit),
+            _ => None,
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Profiles overlay
     // -----------------------------------------------------------------------
     if state.overlay == Overlay::Profiles {
         return match key.code {
@@ -130,6 +162,7 @@ pub fn handle_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
         KeyCode::Char('D') => return Some(AppAction::OpenDsp),
         KeyCode::Char('S') => return Some(AppAction::OpenSettings),
         KeyCode::Char('P') => return Some(AppAction::OpenProfiles),
+        KeyCode::Char('B') if state.beacn_connected => return Some(AppAction::OpenBeacn),
         _ => {}
     }
 

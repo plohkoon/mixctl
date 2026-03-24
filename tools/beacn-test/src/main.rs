@@ -333,6 +333,9 @@ async fn main() {
                     cmd_tx.send(DeviceCommand::UpdateState(mixer.build_snapshot())).ok();
                 }
             }
+            other => {
+                info!("unhandled event in test harness: {other:?}");
+            }
         }
     }
 

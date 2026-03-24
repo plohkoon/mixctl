@@ -166,7 +166,10 @@ async fn run_daemon_session(
         display: beacn_config.display_brightness,
         led: beacn_config.led_brightness,
     }).ok();
-    dev_cmd_tx.send(DeviceCommand::SetButtonMappings(beacn_config.button_mappings.clone())).ok();
+    dev_cmd_tx.send(DeviceCommand::SetButtonConfig {
+        mappings: beacn_config.button_mappings.clone(),
+        hold_threshold: std::time::Duration::from_millis(beacn_config.hold_threshold_ms),
+    }).ok();
     info!("beacn config: layout={}, dial_sensitivity={}, brightness={}:{}, level_decay={}",
         beacn_config.layout, beacn_config.dial_sensitivity,
         beacn_config.display_brightness, beacn_config.led_brightness,
@@ -298,7 +301,10 @@ async fn run_daemon_session(
                             display: config.display_brightness,
                             led: config.led_brightness,
                         }).ok();
-                        t8.send(DeviceCommand::SetButtonMappings(config.button_mappings.clone())).ok();
+                        t8.send(DeviceCommand::SetButtonConfig {
+                            mappings: config.button_mappings.clone(),
+                            hold_threshold: std::time::Duration::from_millis(config.hold_threshold_ms),
+                        }).ok();
                     }
                 }
                 Err(e) => warn!("failed to re-fetch beacn config: {e}"),
@@ -431,6 +437,70 @@ async fn run_daemon_session(
                     let snapshot = s.build_snapshot();
                     dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
                 }
+            }
+            DeviceEvent::ToggleOutputMute { output_id } => {
+                match proxy.get_output(output_id).await {
+                    Ok(info) => {
+                        if let Err(e) = proxy.set_output_mute(output_id, !info.muted).await {
+                            warn!("set_output_mute failed: {e}");
+                        }
+                    }
+                    Err(e) => warn!("get_output failed: {e}"),
+                }
+            }
+            DeviceEvent::ToggleAllOutputsMute => {
+                let s = state.lock().await;
+                let output_ids = s.output_ids();
+                drop(s);
+                let mut any_unmuted = false;
+                for &id in &output_ids {
+                    if let Ok(info) = proxy.get_output(id).await {
+                        if !info.muted { any_unmuted = true; break; }
+                    }
+                }
+                let new_muted = any_unmuted;
+                for &id in &output_ids {
+                    proxy.set_output_mute(id, new_muted).await.ok();
+                }
+            }
+            DeviceEvent::ToggleEq { input_id } => {
+                if let Ok(enabled) = proxy.get_input_eq_enabled(input_id).await {
+                    proxy.set_input_eq_enabled(input_id, !enabled).await.ok();
+                }
+            }
+            DeviceEvent::ToggleGate { input_id } => {
+                if let Ok(info) = proxy.get_input_gate(input_id).await {
+                    proxy.set_input_gate_enabled(input_id, !info.enabled).await.ok();
+                }
+            }
+            DeviceEvent::ToggleDeesser { input_id } => {
+                if let Ok(info) = proxy.get_input_deesser(input_id).await {
+                    proxy.set_input_deesser_enabled(input_id, !info.enabled).await.ok();
+                }
+            }
+            DeviceEvent::ToggleCompressor { output_id } => {
+                if let Ok(info) = proxy.get_output_compressor(output_id).await {
+                    proxy.set_output_compressor_enabled(output_id, !info.enabled).await.ok();
+                }
+            }
+            DeviceEvent::ToggleLimiter { output_id } => {
+                if let Ok(info) = proxy.get_output_limiter(output_id).await {
+                    proxy.set_output_limiter_enabled(output_id, !info.enabled).await.ok();
+                }
+            }
+            DeviceEvent::LoadProfile { name } => {
+                if let Err(e) = proxy.load_profile(&name).await {
+                    warn!("load_profile failed: {e}");
+                }
+            }
+            DeviceEvent::SetGlobalMute { input_id, muted } => {
+                let mut s = state.lock().await;
+                for &output_id in &s.output_ids() {
+                    proxy.set_route_mute(input_id, output_id, muted).await.ok();
+                    s.set_route_muted(input_id, output_id, muted);
+                }
+                let snapshot = s.build_snapshot();
+                dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
             }
         }
     }
