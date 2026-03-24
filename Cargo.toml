@@ -3,8 +3,6 @@ resolver = "2"
 members = [
   "daemon",
   "apps/cli",
-  "apps/ui",
-  "apps/applet",
   "apps/tauri/src-tauri",
   "crates/core",
   "crates/protocol",

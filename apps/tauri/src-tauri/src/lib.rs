@@ -203,6 +203,12 @@ fn setup_ksni_tray(app_handle: tauri::AppHandle) {
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();
                         let _ = win.set_focus();
+                    } else if let Ok(win) = tauri::WebviewWindowBuilder::new(&handle, "main", tauri::WebviewUrl::App("index.html".into()))
+                        .title("MixCtl")
+                        .inner_size(750.0, 450.0)
+                        .build()
+                    {
+                        let _ = win.set_focus();
                     }
                 }
                 tray::TrayAction::Quit => {

@@ -120,11 +120,20 @@ export default function AppletPage() {
       <button
         onClick={async () => {
           const { getAllWindows } = await import("@tauri-apps/api/window");
+          const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
           const allWins = await getAllWindows();
           const mainWin = allWins.find((w) => w.label === "main");
           if (mainWin) {
             await mainWin.show();
             await mainWin.setFocus();
+          } else {
+            const win = new WebviewWindow("main", {
+              url: "/",
+              title: "MixCtl",
+              width: 750,
+              height: 450,
+            });
+            await win.once("tauri://created", () => win.setFocus());
           }
           getCurrentWindow().hide();
         }}

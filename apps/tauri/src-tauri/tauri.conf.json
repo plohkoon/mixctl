@@ -50,9 +50,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "category": "Music",
+    "shortDescription": "Audio mixer for Linux with PipeWire routing",
+    "longDescription": "MixCtl is a Linux audio mixer that creates virtual PipeWire inputs and outputs, letting you route and mix application audio with per-route volume and mute control. Includes DSP processing (EQ, gate, de-esser, compressor, limiter) and hardware integration for Beacn Mix devices.",
     "linux": {
       "deb": {
-        "depends": []
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
+        "desktopTemplate": "mixctl.desktop"
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "gtk3"]
       }
     }
   }

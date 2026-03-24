@@ -143,8 +143,6 @@ pub struct AppletConfig {
     pub window_width: i32,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
-    #[serde(default = "default_open_ui_command")]
-    pub open_ui_command: String,
 }
 
 impl Default for AppletConfig {
@@ -152,7 +150,6 @@ impl Default for AppletConfig {
         Self {
             window_width: default_applet_window_width(),
             poll_interval_ms: default_poll_interval_ms(),
-            open_ui_command: default_open_ui_command(),
         }
     }
 }
@@ -162,9 +159,6 @@ fn default_applet_window_width() -> i32 {
 }
 fn default_poll_interval_ms() -> u64 {
     30
-}
-fn default_open_ui_command() -> String {
-    "mixctl-ui".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

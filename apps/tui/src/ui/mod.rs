@@ -1,155 +1,88 @@
-mod capture;
 mod dsp;
-mod routes;
-mod rules;
+mod footer;
+mod header;
+mod matrix;
+mod profiles;
 mod settings;
-mod streams;
 mod status;
-mod tabs;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::app::AppState;
+use crate::app::{AppState, Overlay};
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
 
-    // Top-level layout: tabs | main | status
+    // Top-level layout: header(1) | matrix(fill) | footer(5) | status(1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // output tabs
-            Constraint::Min(6),   // main content
+            Constraint::Length(1),  // header
+            Constraint::Min(4),    // matrix grid
+            Constraint::Length(5), // footer
             Constraint::Length(1), // status bar
         ])
         .split(area);
 
-    tabs::render(frame, chunks[0], state);
+    header::render(frame, chunks[0], state);
+    matrix::render(frame, chunks[1], state);
+    footer::render(frame, chunks[2], state);
+    status::render(frame, chunks[3], state);
 
-    // Main area: split horizontally for left panel + streams (right)
-    if area.width >= 80 {
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(60),
-                Constraint::Percentage(40),
-            ])
-            .split(chunks[1]);
-
-        // Left side: active left panel + output master
-        let left_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),    // left panel
-                Constraint::Length(5), // output master
-            ])
-            .split(main_chunks[0]);
-
-        // Render the current left-side panel
-        match state.active_panel {
-            crate::app::Panel::Rules => rules::render(frame, left_chunks[0], state),
-            crate::app::Panel::Capture => capture::render(frame, left_chunks[0], state),
-            crate::app::Panel::Settings => settings::render(frame, left_chunks[0], state),
-            crate::app::Panel::Dsp => dsp::render(frame, left_chunks[0], state),
-            _ => routes::render(frame, left_chunks[0], state),
-        }
-        render_output_master(frame, left_chunks[1], state);
-        streams::render(frame, main_chunks[1], state);
-    } else {
-        // Narrow terminal: show only the active panel
-        match state.active_panel {
-            crate::app::Panel::Routes => routes::render(frame, chunks[1], state),
-            crate::app::Panel::Streams => streams::render(frame, chunks[1], state),
-            crate::app::Panel::Outputs => render_output_master(frame, chunks[1], state),
-            crate::app::Panel::Rules => rules::render(frame, chunks[1], state),
-            crate::app::Panel::Capture => capture::render(frame, chunks[1], state),
-            crate::app::Panel::Settings => settings::render(frame, chunks[1], state),
-            crate::app::Panel::Dsp => dsp::render(frame, chunks[1], state),
-        }
-    }
-
-    status::render(frame, chunks[2], state);
-
-    // Help overlay
-    if state.show_help {
-        render_help(frame, area);
+    // Overlay rendering
+    match state.overlay {
+        Overlay::None => {}
+        Overlay::Help => render_help(frame, area),
+        Overlay::Dsp => render_overlay(frame, area, |f, a| dsp::render(f, a, state)),
+        Overlay::Settings => render_overlay(frame, area, |f, a| settings::render(f, a, state)),
+        Overlay::Profiles => render_overlay(frame, area, |f, a| profiles::render(f, a, state)),
     }
 }
 
-fn render_output_master(frame: &mut Frame, area: Rect, state: &AppState) {
-    let is_active = matches!(state.active_panel, crate::app::Panel::Outputs);
-    let border_style = if is_active {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+/// Render a full-screen overlay: clear the area, then call the inner renderer
+/// with an inset popup rect.
+fn render_overlay(frame: &mut Frame, area: Rect, inner: impl FnOnce(&mut Frame, Rect)) {
+    let w = area.width.saturating_sub(4).min(100);
+    let h = area.height.saturating_sub(4);
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
 
-    let block = Block::default()
-        .title(" Output Master ")
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if let Some(output) = state.outputs.get(state.selected_output_idx) {
-        let color = parse_color(&output.color);
-        let mute_indicator = if output.muted { " M" } else { "" };
-        let label = format!("{} {}%{}", output.name, output.volume, mute_indicator);
-
-        let gauge = ratatui::widgets::Gauge::default()
-            .gauge_style(Style::default().fg(color).bg(Color::DarkGray))
-            .ratio(output.volume as f64 / 100.0)
-            .label(label);
-
-        if inner.height > 0 {
-            frame.render_widget(gauge, Rect { y: inner.y + inner.height / 2, height: 1, ..inner });
-        }
-    }
+    frame.render_widget(Clear, popup);
+    inner(frame, popup);
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help_text = "\
  Navigation
-  Tab/Shift-Tab  Switch panel
-  j/k ↑/↓        Move cursor
-  1-9             Select output tab
+  Tab/Shift-Tab  Cycle focus area
+  j/k or arrows  Move cursor
   ?               Toggle help
 
- Volume
-  h/l ←/→         Adjust ±5
-  H/L              Adjust ±1
+ Matrix (main area)
+  h/l or arrows   Adjust volume +/-5
+  H/L              Adjust volume +/-1
+  m                Toggle mute
+  d                Set as default input/output
 
- Mute
-  m     Toggle route/output mute
-  M     Toggle output master mute
+ Overlays
+  D     DSP settings
+  S     Channel settings
+  P     Profiles
+  Esc   Close overlay
 
- Settings
-  r     Rename channel
-  c     Cycle colour
-  t     Cycle target device
-  a     Add channel
-  x     Remove channel
-  J/K   Reorder up/down
-
- Capture
-  a     Add capture input
-  x     Remove capture input
-  h/l   Adjust capture volume
-  m     Toggle capture mute
-
- DSP
-  Enter  Edit DSP parameters
-  e/g/d  Toggle EQ/gate/de-esser
-  c/l    Toggle compressor/limiter
-  R      Reset EQ
-  (edit) h/l H/L j/k Esc
+ Footer sections
+  j/k   Navigate items
+  1-9   Assign to input
+  x     Delete / remove
+  u     Unbind
 
  General
   q     Quit";
 
-    let w = 42.min(area.width.saturating_sub(4));
-    let h = 30.min(area.height.saturating_sub(2));
+    let w = 48.min(area.width.saturating_sub(4));
+    let h = 28.min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
     let popup_area = Rect::new(x, y, w, h);

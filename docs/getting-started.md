@@ -42,9 +42,10 @@ Apps (Spotify, Discord, Games)
 cargo install --path daemon
 cargo install --path apps/cli
 cargo install --path apps/tui
-cargo install --path apps/ui
-cargo install --path apps/applet
 cargo install --path devices/beacn-daemon  # only if you have BEACN hardware
+
+# Desktop UI (Tauri — requires Node.js)
+cd apps/tauri && npm install && npm run tauri build
 ```
 
 ### systemd service

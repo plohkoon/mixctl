@@ -22,11 +22,17 @@ pub async fn connect_and_load() -> Result<(MixCtlProxy<'static>, AppState)> {
     let playback_devices = proxy.list_playback_devices().await.unwrap_or_default();
     let components = proxy.list_components().await.unwrap_or_default();
 
-    let routes = if let Some(first_output) = outputs.first() {
-        proxy.list_routes_for_output(first_output.id).await?
-    } else {
-        vec![]
-    };
+    // Fetch routes for ALL outputs, not just the first one.
+    let mut all_routes = Vec::new();
+    for output in &outputs {
+        if let Ok(routes) = proxy.list_routes_for_output(output.id).await {
+            all_routes.extend(routes);
+        }
+    }
+
+    let default_input = proxy.get_default_input().await.unwrap_or(0);
+    let default_output = proxy.get_default_output().await.unwrap_or(0);
+    let profiles = proxy.list_profiles().await.unwrap_or_default();
 
     let beacn_config = match proxy.get_config_section("beacn").await {
         Ok(json) => serde_json::from_str::<BeacnConfig>(&json).ok(),
@@ -38,7 +44,21 @@ pub async fn connect_and_load() -> Result<(MixCtlProxy<'static>, AppState)> {
         Err(_) => TuiConfig::default(),
     };
 
-    let mut state = AppState::new(inputs, outputs, routes, streams, rules, capture_devices, playback_devices, components, beacn_config, tui_config);
+    let mut state = AppState::new(
+        inputs,
+        outputs,
+        all_routes,
+        streams,
+        rules,
+        capture_devices,
+        playback_devices,
+        components,
+        beacn_config,
+        tui_config,
+        default_input,
+        default_output,
+        profiles,
+    );
 
     // Load initial DSP state for all inputs
     for input in &state.inputs {
@@ -264,6 +284,18 @@ pub async fn subscribe_signals(
         }
     });
 
+    // profile_changed → refresh the profile list
+    let p = proxy.clone();
+    let t = tx.clone();
+    let mut stream = proxy.receive_profile_changed().await?;
+    tokio::spawn(async move {
+        while stream.next().await.is_some() {
+            if let Ok(profiles) = p.list_profiles().await {
+                t.send(DaemonSignal::ProfilesRefreshed(profiles)).ok();
+            }
+        }
+    });
+
     Ok(rx)
 }
 
@@ -274,10 +306,24 @@ async fn send_full_refresh(
     let inputs = proxy.list_inputs().await.unwrap_or_default();
     let outputs = proxy.list_outputs().await.unwrap_or_default();
     let streams = proxy.list_streams().await.unwrap_or_default();
-    let routes = if let Some(first) = outputs.first() {
-        proxy.list_routes_for_output(first.id).await.unwrap_or_default()
-    } else {
-        vec![]
-    };
-    tx.send(DaemonSignal::FullRefresh { inputs, outputs, routes, streams }).ok();
+
+    // Fetch routes for ALL outputs
+    let mut all_routes = Vec::new();
+    for output in &outputs {
+        if let Ok(routes) = proxy.list_routes_for_output(output.id).await {
+            all_routes.extend(routes);
+        }
+    }
+
+    let default_input = proxy.get_default_input().await.unwrap_or(0);
+    let default_output = proxy.get_default_output().await.unwrap_or(0);
+
+    tx.send(DaemonSignal::FullRefresh {
+        inputs,
+        outputs,
+        all_routes,
+        streams,
+        default_input,
+        default_output,
+    }).ok();
 }

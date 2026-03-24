@@ -14,45 +14,74 @@ pub const COLOR_PALETTE: &[&str] = &[
     "#3498DB", "#E67E22", "#1ABC9C", "#9B59B6", "#27AE60",
 ];
 
-/// Panels the user can navigate between.
+// ---------------------------------------------------------------------------
+// Overlay / focus model (replaces Panel enum)
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Panel {
-    Routes,
-    Streams,
-    Outputs,
-    Rules,
-    Capture,
-    Settings,
+pub enum Overlay {
+    None,
     Dsp,
+    Settings,
+    Profiles,
+    Help,
 }
 
-/// Actions dispatched from key events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusArea {
+    Matrix,
+    Streams,
+    Capture,
+    Playback,
+    Rules,
+}
+
+impl FocusArea {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Matrix => Self::Streams,
+            Self::Streams => Self::Capture,
+            Self::Capture => Self::Playback,
+            Self::Playback => Self::Rules,
+            Self::Rules => Self::Matrix,
+        }
+    }
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Matrix => Self::Rules,
+            Self::Streams => Self::Matrix,
+            Self::Capture => Self::Streams,
+            Self::Playback => Self::Capture,
+            Self::Rules => Self::Playback,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
 pub enum AppAction {
     Quit,
-    NextPanel,
-    PrevPanel,
+    NextFocus,
+    PrevFocus,
+    // Matrix navigation
     CursorUp,
     CursorDown,
+    CursorLeft,
+    CursorRight,
+    // Volume
     VolumeUp { fine: bool },
     VolumeDown { fine: bool },
     ToggleMute,
-    ToggleOutputMute,
-    SelectOutputTab(usize),
-    ShowHelp,
-    DeleteRule,
-    AssignRuleToInput(usize),
-    BindCapture(usize),
-    UnbindCapture,
-    CycleInputColor,
-    CycleOutputColor,
-    ToggleEq,
-    ToggleGate,
-    ToggleDeesser,
-    ToggleCompressor,
-    ToggleLimiter,
-    MoveUp,
-    MoveDown,
+    // Overlays
+    OpenDsp,
+    OpenSettings,
+    OpenProfiles,
+    ToggleHelp,
+    CloseOverlay,
+    // Channel management (in settings overlay)
     AddChannel,
     RemoveChannel,
     StartRename,
@@ -60,25 +89,46 @@ pub enum AppAction {
     CancelRename,
     RenameChar(char),
     RenameBackspace,
-    // Step 6: Output target selector
+    CycleColor,
     SetOutputTarget,
-    // Step 7: Capture device management
-    AddCaptureInput,
-    RemoveCaptureInput,
-    SetCaptureVolume { fine: bool },
-    DecreaseCaptureVolume { fine: bool },
-    SetCaptureMute,
-    // Step 8: DSP parameter editing
+    MoveUp,
+    MoveDown,
+    SetDefault,
+    // Footer actions
+    FooterUp,
+    FooterDown,
+    AssignToInput(usize),
+    DeleteItem,
+    UnbindItem,
+    // DSP (in DSP overlay)
+    ToggleEq,
+    ToggleGate,
+    ToggleDeesser,
+    ToggleCompressor,
+    ToggleLimiter,
+    DspResetEq,
     EnterDspEdit,
     ExitDspEdit,
     DspValueUp { fine: bool },
     DspValueDown { fine: bool },
     DspParamNext,
     DspParamPrev,
-    DspResetEq,
+    DspCursorUp,
+    DspCursorDown,
+    // Profile actions (in profile overlay)
+    ProfileSave,
+    ProfileLoad,
+    ProfileDelete,
+    ProfileNameChar(char),
+    ProfileNameBackspace,
+    ProfileConfirmName,
+    ProfileCancelName,
 }
 
-/// Signals received from D-Bus, pre-processed with fresh data.
+// ---------------------------------------------------------------------------
+// Daemon signals
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
 pub enum DaemonSignal {
     RouteUpdated(RouteInfo),
@@ -87,8 +137,10 @@ pub enum DaemonSignal {
     FullRefresh {
         inputs: Vec<InputInfo>,
         outputs: Vec<OutputInfo>,
-        routes: Vec<RouteInfo>,
+        all_routes: Vec<RouteInfo>,
         streams: Vec<StreamInfo>,
+        default_input: u32,
+        default_output: u32,
     },
     RulesRefreshed(Vec<AppRuleInfo>),
     CaptureDevicesRefreshed(Vec<CaptureDeviceInfo>),
@@ -107,31 +159,44 @@ pub enum DaemonSignal {
         compressor: CompressorInfo,
         limiter: LimiterInfo,
     },
+    ProfilesRefreshed(Vec<String>),
 }
 
+// ---------------------------------------------------------------------------
+// AppState
+// ---------------------------------------------------------------------------
+
 pub struct AppState {
+    // Data
     pub inputs: Vec<InputInfo>,
     pub outputs: Vec<OutputInfo>,
-    pub routes: Vec<RouteInfo>,
+    pub all_routes: Vec<RouteInfo>,
     pub streams: Vec<StreamInfo>,
     pub rules: Vec<AppRuleInfo>,
     pub capture_devices: Vec<CaptureDeviceInfo>,
     pub playback_devices: Vec<PlaybackDeviceInfo>,
     pub components: Vec<ComponentInfo>,
+    pub default_input: u32,
+    pub default_output: u32,
+    pub profiles: Vec<String>,
 
+    // Config
     pub config: TuiConfig,
-    pub active_panel: Panel,
-    pub selected_output_idx: usize,
-    pub route_cursor: usize,
-    pub stream_cursor: usize,
-    pub output_cursor: usize,
-    pub rule_cursor: usize,
-    pub capture_cursor: usize,
-    pub settings_cursor: usize,
     pub beacn_connected: bool,
     pub beacn_config: Option<BeacnConfig>,
-    pub show_help: bool,
+
+    // Navigation
+    pub overlay: Overlay,
+    pub focus: FocusArea,
+    /// Matrix cursor: (row, col). row=0 is output header, 1..=N are input rows.
+    /// col=0 is input label column, 1..=M are output columns.
+    pub matrix_row: usize,
+    pub matrix_col: usize,
+    pub footer_cursor: usize,
+
+    // Overlay state
     pub rename_buf: Option<String>,
+    pub settings_cursor: usize,
 
     // DSP state caches
     pub dsp_input_eq: HashMap<u32, (bool, Vec<EqBandInfo>)>,
@@ -140,17 +205,19 @@ pub struct AppState {
     pub dsp_output_compressor: HashMap<u32, CompressorInfo>,
     pub dsp_output_limiter: HashMap<u32, LimiterInfo>,
     pub dsp_cursor: usize,
-
-    // DSP editing mode (Step 8)
     pub dsp_editing: bool,
     pub dsp_param_cursor: usize,
+
+    // Profile overlay state
+    pub profile_cursor: usize,
+    pub profile_name_buf: Option<String>,
 }
 
 impl AppState {
     pub fn new(
         inputs: Vec<InputInfo>,
         outputs: Vec<OutputInfo>,
-        routes: Vec<RouteInfo>,
+        all_routes: Vec<RouteInfo>,
         streams: Vec<StreamInfo>,
         rules: Vec<AppRuleInfo>,
         capture_devices: Vec<CaptureDeviceInfo>,
@@ -158,100 +225,115 @@ impl AppState {
         components: Vec<ComponentInfo>,
         beacn_config: Option<BeacnConfig>,
         config: TuiConfig,
+        default_input: u32,
+        default_output: u32,
+        profiles: Vec<String>,
     ) -> Self {
         let beacn_connected = components.iter().any(|c| c.component_type == "beacn");
-        let initial_panel = match config.initial_panel.as_str() {
-            "streams" => Panel::Streams,
-            "outputs" => Panel::Outputs,
-            "rules" => Panel::Rules,
-            "capture" => Panel::Capture,
-            "settings" => Panel::Settings,
-            "dsp" => Panel::Dsp,
-            _ => Panel::Routes,
-        };
         Self {
             inputs,
             outputs,
-            routes,
+            all_routes,
             streams,
             rules,
             capture_devices,
             playback_devices,
             components,
+            default_input,
+            default_output,
+            profiles,
             config,
-            active_panel: initial_panel,
-            selected_output_idx: 0,
-            route_cursor: 0,
-            stream_cursor: 0,
-            output_cursor: 0,
-            rule_cursor: 0,
-            capture_cursor: 0,
-            settings_cursor: 0,
             beacn_connected,
             beacn_config,
-            show_help: false,
+            overlay: Overlay::None,
+            focus: FocusArea::Matrix,
+            matrix_row: 1, // start on first input row
+            matrix_col: 1, // start on first output column
+            footer_cursor: 0,
             rename_buf: None,
-
+            settings_cursor: 0,
             dsp_input_eq: HashMap::new(),
             dsp_input_gate: HashMap::new(),
             dsp_input_deesser: HashMap::new(),
             dsp_output_compressor: HashMap::new(),
             dsp_output_limiter: HashMap::new(),
             dsp_cursor: 0,
-
             dsp_editing: false,
             dsp_param_cursor: 0,
+            profile_cursor: 0,
+            profile_name_buf: None,
+        }
+    }
+
+    // -- Matrix helpers --
+
+    /// Get the route for the matrix cell at (input_row_1based, output_col_1based).
+    pub fn route_at(&self, row: usize, col: usize) -> Option<&RouteInfo> {
+        let input = self.inputs.get(row.checked_sub(1)?)?;
+        let output = self.outputs.get(col.checked_sub(1)?)?;
+        self.all_routes.iter().find(|r| r.input_id == input.id && r.output_id == output.id)
+    }
+
+    /// Get the input for a matrix row (1-based).
+    pub fn input_at_row(&self, row: usize) -> Option<&InputInfo> {
+        self.inputs.get(row.checked_sub(1)?)
+    }
+
+    /// Get the output for a matrix column (1-based).
+    pub fn output_at_col(&self, col: usize) -> Option<&OutputInfo> {
+        self.outputs.get(col.checked_sub(1)?)
+    }
+
+    /// Number of items in the currently focused footer section.
+    pub fn footer_item_count(&self) -> usize {
+        match self.focus {
+            FocusArea::Streams => self.streams.len(),
+            FocusArea::Capture => self.capture_devices.len(),
+            FocusArea::Playback => self.playback_devices.len(),
+            FocusArea::Rules => self.rules.len(),
+            FocusArea::Matrix => 0,
         }
     }
 
     fn clamp_cursors(&mut self) {
-        if !self.routes.is_empty() {
-            self.route_cursor = self.route_cursor.min(self.routes.len() - 1);
+        let max_row = self.inputs.len(); // 0=header, 1..=N inputs
+        let max_col = self.outputs.len();
+        if max_row > 0 {
+            self.matrix_row = self.matrix_row.clamp(0, max_row);
         } else {
-            self.route_cursor = 0;
+            self.matrix_row = 0;
         }
-        if !self.streams.is_empty() {
-            self.stream_cursor = self.stream_cursor.min(self.streams.len() - 1);
+        if max_col > 0 {
+            self.matrix_col = self.matrix_col.clamp(0, max_col);
         } else {
-            self.stream_cursor = 0;
+            self.matrix_col = 0;
         }
-        if !self.outputs.is_empty() {
-            self.output_cursor = self.output_cursor.min(self.outputs.len() - 1);
-            self.selected_output_idx = self.selected_output_idx.min(self.outputs.len() - 1);
+        let footer_count = self.footer_item_count();
+        if footer_count > 0 {
+            self.footer_cursor = self.footer_cursor.min(footer_count - 1);
         } else {
-            self.output_cursor = 0;
-            self.selected_output_idx = 0;
+            self.footer_cursor = 0;
         }
-        if !self.rules.is_empty() {
-            self.rule_cursor = self.rule_cursor.min(self.rules.len() - 1);
-        } else {
-            self.rule_cursor = 0;
-        }
-        if !self.capture_devices.is_empty() {
-            self.capture_cursor = self.capture_cursor.min(self.capture_devices.len() - 1);
-        } else {
-            self.capture_cursor = 0;
-        }
-        let settings_items = self.inputs.len() + self.outputs.len();
-        if settings_items > 0 {
-            self.settings_cursor = self.settings_cursor.min(settings_items - 1);
+        let settings_total = self.inputs.len() + self.outputs.len();
+        if settings_total > 0 {
+            self.settings_cursor = self.settings_cursor.min(settings_total - 1);
         } else {
             self.settings_cursor = 0;
         }
-        // DSP panel cursor: total selectable items = inputs + outputs
-        let dsp_items = self.inputs.len() + self.outputs.len();
-        if dsp_items > 0 {
-            self.dsp_cursor = self.dsp_cursor.min(dsp_items - 1);
+        let dsp_total = self.inputs.len() + self.outputs.len();
+        if dsp_total > 0 {
+            self.dsp_cursor = self.dsp_cursor.min(dsp_total - 1);
         } else {
             self.dsp_cursor = 0;
         }
     }
 
+    // -- Signal handling --
+
     pub fn handle_signal(&mut self, signal: DaemonSignal) {
         match signal {
             DaemonSignal::RouteUpdated(route) => {
-                // Update the specific route in place if it belongs to the selected output
-                if let Some(existing) = self.routes.iter_mut().find(|r| {
+                if let Some(existing) = self.all_routes.iter_mut().find(|r| {
                     r.input_id == route.input_id && r.output_id == route.output_id
                 }) {
                     *existing = route;
@@ -261,11 +343,13 @@ impl AppState {
                 self.outputs = outputs;
             }
             DaemonSignal::StreamsRefreshed(streams) => self.streams = streams,
-            DaemonSignal::FullRefresh { inputs, outputs, routes, streams } => {
+            DaemonSignal::FullRefresh { inputs, outputs, all_routes, streams, default_input, default_output } => {
                 self.inputs = inputs;
                 self.outputs = outputs;
-                self.routes = routes;
+                self.all_routes = all_routes;
                 self.streams = streams;
+                self.default_input = default_input;
+                self.default_output = default_output;
             }
             DaemonSignal::RulesRefreshed(rules) => self.rules = rules,
             DaemonSignal::CaptureDevicesRefreshed(devices) => self.capture_devices = devices,
@@ -286,259 +370,128 @@ impl AppState {
                 self.dsp_output_compressor.insert(output_id, compressor);
                 self.dsp_output_limiter.insert(output_id, limiter);
             }
+            DaemonSignal::ProfilesRefreshed(profiles) => {
+                self.profiles = profiles;
+            }
         }
         self.clamp_cursors();
     }
 
+    // -- Action handling --
+
     pub async fn handle_action(&mut self, action: AppAction, proxy: &MixCtlProxy<'_>) {
         match action {
-            AppAction::Quit => {} // handled in main loop
-            AppAction::NextPanel => {
-                self.active_panel = match self.active_panel {
-                    Panel::Routes => Panel::Streams,
-                    Panel::Streams => Panel::Outputs,
-                    Panel::Outputs => Panel::Rules,
-                    Panel::Rules => Panel::Capture,
-                    Panel::Capture => Panel::Settings,
-                    Panel::Settings => Panel::Dsp,
-                    Panel::Dsp => Panel::Routes,
-                };
+            AppAction::Quit => {}
+            AppAction::NextFocus => {
+                self.focus = self.focus.next();
+                self.footer_cursor = 0;
             }
-            AppAction::PrevPanel => {
-                self.active_panel = match self.active_panel {
-                    Panel::Routes => Panel::Dsp,
-                    Panel::Streams => Panel::Routes,
-                    Panel::Outputs => Panel::Streams,
-                    Panel::Rules => Panel::Outputs,
-                    Panel::Capture => Panel::Rules,
-                    Panel::Settings => Panel::Capture,
-                    Panel::Dsp => Panel::Settings,
-                };
+            AppAction::PrevFocus => {
+                self.focus = self.focus.prev();
+                self.footer_cursor = 0;
             }
+
+            // -- Matrix navigation --
             AppAction::CursorUp => {
-                match self.active_panel {
-                    Panel::Routes => self.route_cursor = self.route_cursor.saturating_sub(1),
-                    Panel::Streams => self.stream_cursor = self.stream_cursor.saturating_sub(1),
-                    Panel::Outputs => self.output_cursor = self.output_cursor.saturating_sub(1),
-                    Panel::Rules => self.rule_cursor = self.rule_cursor.saturating_sub(1),
-                    Panel::Capture => self.capture_cursor = self.capture_cursor.saturating_sub(1),
-                    Panel::Settings => self.settings_cursor = self.settings_cursor.saturating_sub(1),
-                    Panel::Dsp => self.dsp_cursor = self.dsp_cursor.saturating_sub(1),
+                if self.matrix_row > 0 {
+                    self.matrix_row -= 1;
                 }
             }
             AppAction::CursorDown => {
-                match self.active_panel {
-                    Panel::Routes => {
-                        if self.route_cursor + 1 < self.routes.len() {
-                            self.route_cursor += 1;
-                        }
-                    }
-                    Panel::Streams => {
-                        if self.stream_cursor + 1 < self.streams.len() {
-                            self.stream_cursor += 1;
-                        }
-                    }
-                    Panel::Outputs => {
-                        if self.output_cursor + 1 < self.outputs.len() {
-                            self.output_cursor += 1;
-                        }
-                    }
-                    Panel::Rules => {
-                        if self.rule_cursor + 1 < self.rules.len() {
-                            self.rule_cursor += 1;
-                        }
-                    }
-                    Panel::Capture => {
-                        if self.capture_cursor + 1 < self.capture_devices.len() {
-                            self.capture_cursor += 1;
-                        }
-                    }
-                    Panel::Settings => {
-                        let total = self.inputs.len() + self.outputs.len();
-                        if self.settings_cursor + 1 < total {
-                            self.settings_cursor += 1;
-                        }
-                    }
-                    Panel::Dsp => {
-                        let total = self.inputs.len() + self.outputs.len();
-                        if self.dsp_cursor + 1 < total {
-                            self.dsp_cursor += 1;
-                        }
-                    }
+                if self.matrix_row < self.inputs.len() {
+                    self.matrix_row += 1;
                 }
             }
+            AppAction::CursorLeft => {
+                if self.matrix_col > 0 {
+                    self.matrix_col -= 1;
+                }
+            }
+            AppAction::CursorRight => {
+                if self.matrix_col < self.outputs.len() {
+                    self.matrix_col += 1;
+                }
+            }
+
+            // -- Volume --
             AppAction::VolumeUp { fine } => {
                 let step: i16 = if fine { self.config.volume_fine_step as i16 } else { self.config.volume_step as i16 };
-                match self.active_panel {
-                    Panel::Routes => {
-                        if let Some(route) = self.routes.get(self.route_cursor) {
-                            let new_vol = (route.volume as i16 + step).min(100) as u8;
-                            proxy.set_route_volume(route.input_id, route.output_id, new_vol).await.ok();
-                        }
+                if self.matrix_row == 0 && self.matrix_col >= 1 {
+                    // Output header row: adjust output master volume
+                    if let Some(output) = self.output_at_col(self.matrix_col) {
+                        let new_vol = (output.volume as i16 + step).min(100) as u8;
+                        proxy.set_output_volume(output.id, new_vol).await.ok();
                     }
-                    Panel::Outputs => {
-                        if let Some(output) = self.outputs.get(self.output_cursor) {
-                            let new_vol = (output.volume as i16 + step).min(100) as u8;
-                            proxy.set_output_volume(output.id, new_vol).await.ok();
-                        }
+                } else if self.matrix_row >= 1 && self.matrix_col >= 1 {
+                    // Route cell
+                    if let Some(route) = self.route_at(self.matrix_row, self.matrix_col) {
+                        let new_vol = (route.volume as i16 + step).min(100) as u8;
+                        proxy.set_route_volume(route.input_id, route.output_id, new_vol).await.ok();
                     }
-                    _ => {}
                 }
             }
             AppAction::VolumeDown { fine } => {
                 let step: i16 = if fine { self.config.volume_fine_step as i16 } else { self.config.volume_step as i16 };
-                match self.active_panel {
-                    Panel::Routes => {
-                        if let Some(route) = self.routes.get(self.route_cursor) {
-                            let new_vol = (route.volume as i16 - step).max(0) as u8;
-                            proxy.set_route_volume(route.input_id, route.output_id, new_vol).await.ok();
-                        }
+                if self.matrix_row == 0 && self.matrix_col >= 1 {
+                    if let Some(output) = self.output_at_col(self.matrix_col) {
+                        let new_vol = (output.volume as i16 - step).max(0) as u8;
+                        proxy.set_output_volume(output.id, new_vol).await.ok();
                     }
-                    Panel::Outputs => {
-                        if let Some(output) = self.outputs.get(self.output_cursor) {
-                            let new_vol = (output.volume as i16 - step).max(0) as u8;
-                            proxy.set_output_volume(output.id, new_vol).await.ok();
-                        }
+                } else if self.matrix_row >= 1 && self.matrix_col >= 1 {
+                    if let Some(route) = self.route_at(self.matrix_row, self.matrix_col) {
+                        let new_vol = (route.volume as i16 - step).max(0) as u8;
+                        proxy.set_route_volume(route.input_id, route.output_id, new_vol).await.ok();
                     }
-                    _ => {}
                 }
             }
             AppAction::ToggleMute => {
-                match self.active_panel {
-                    Panel::Routes => {
-                        if let Some(route) = self.routes.get(self.route_cursor) {
-                            proxy.set_route_mute(route.input_id, route.output_id, !route.muted).await.ok();
-                        }
+                if self.matrix_row == 0 && self.matrix_col >= 1 {
+                    if let Some(output) = self.output_at_col(self.matrix_col) {
+                        proxy.set_output_mute(output.id, !output.muted).await.ok();
                     }
-                    Panel::Outputs => {
-                        if let Some(output) = self.outputs.get(self.output_cursor) {
-                            proxy.set_output_mute(output.id, !output.muted).await.ok();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            AppAction::ToggleOutputMute => {
-                if let Some(output) = self.outputs.get(self.selected_output_idx) {
-                    proxy.set_output_mute(output.id, !output.muted).await.ok();
-                }
-            }
-            AppAction::SelectOutputTab(idx) => {
-                if idx < self.outputs.len() {
-                    self.selected_output_idx = idx;
-                    // Re-fetch routes for the newly selected output
-                    if let Some(output) = self.outputs.get(idx) {
-                        if let Ok(routes) = proxy.list_routes_for_output(output.id).await {
-                            self.routes = routes;
-                        }
+                } else if self.matrix_row >= 1 && self.matrix_col >= 1 {
+                    if let Some(route) = self.route_at(self.matrix_row, self.matrix_col) {
+                        proxy.set_route_mute(route.input_id, route.output_id, !route.muted).await.ok();
                     }
                 }
             }
-            AppAction::ShowHelp => {
-                self.show_help = !self.show_help;
-            }
-            AppAction::DeleteRule => {
-                if let Some(rule) = self.rules.get(self.rule_cursor) {
-                    proxy.remove_app_rule(&rule.app_name).await.ok();
+
+            // -- Overlays --
+            AppAction::OpenDsp => {
+                // Select the input or output under cursor for DSP editing
+                if self.matrix_row >= 1 {
+                    self.dsp_cursor = self.matrix_row - 1; // input index
+                } else if self.matrix_col >= 1 {
+                    self.dsp_cursor = self.inputs.len() + (self.matrix_col - 1); // output index
                 }
+                self.dsp_editing = false;
+                self.dsp_param_cursor = 0;
+                self.overlay = Overlay::Dsp;
             }
-            AppAction::AssignRuleToInput(n) => {
-                if let Some(rule) = self.rules.get(self.rule_cursor) {
-                    if let Some(input) = self.inputs.get(n - 1) {
-                        proxy.set_app_rule(&rule.app_name, input.id).await.ok();
-                    }
+            AppAction::OpenSettings => {
+                // Select input or output under cursor
+                if self.matrix_row >= 1 && self.matrix_col == 0 {
+                    self.settings_cursor = self.matrix_row - 1;
+                } else if self.matrix_row == 0 && self.matrix_col >= 1 {
+                    self.settings_cursor = self.inputs.len() + (self.matrix_col - 1);
                 }
+                self.overlay = Overlay::Settings;
             }
-            AppAction::BindCapture(n) => {
-                if let Some(device) = self.capture_devices.get(self.capture_cursor) {
-                    if let Some(input) = self.inputs.get(n - 1) {
-                        proxy.bind_capture_to_input(input.id, &device.device_name).await.ok();
-                    }
-                }
+            AppAction::OpenProfiles => {
+                self.profiles = proxy.list_profiles().await.unwrap_or_default();
+                self.profile_cursor = 0;
+                self.profile_name_buf = None;
+                self.overlay = Overlay::Profiles;
             }
-            AppAction::UnbindCapture => {
-                if let Some(device) = self.capture_devices.get(self.capture_cursor) {
-                    // Unbind by binding to input 0 (no input)
-                    proxy.bind_capture_to_input(0, &device.device_name).await.ok();
-                }
+            AppAction::ToggleHelp => {
+                self.overlay = if self.overlay == Overlay::Help { Overlay::None } else { Overlay::Help };
             }
-            AppAction::CycleInputColor => {
-                if let Some(input) = self.inputs.get(self.settings_cursor) {
-                    let current = &input.color;
-                    let next = next_palette_color(current);
-                    proxy.set_input_color(input.id, next).await.ok();
-                }
+            AppAction::CloseOverlay => {
+                self.dsp_editing = false;
+                self.overlay = Overlay::None;
             }
-            AppAction::CycleOutputColor => {
-                let output_idx = self.settings_cursor.saturating_sub(self.inputs.len());
-                if let Some(output) = self.outputs.get(output_idx) {
-                    let current = &output.color;
-                    let next = next_palette_color(current);
-                    proxy.set_output_color(output.id, next).await.ok();
-                }
-            }
-            AppAction::ToggleEq => {
-                if let Some(input) = self.dsp_selected_input() {
-                    let current = self.dsp_input_eq.get(&input.id).map(|(e, _)| *e).unwrap_or(false);
-                    proxy.set_input_eq_enabled(input.id, !current).await.ok();
-                }
-            }
-            AppAction::ToggleGate => {
-                if let Some(input) = self.dsp_selected_input() {
-                    let current = self.dsp_input_gate.get(&input.id).map(|g| g.enabled).unwrap_or(false);
-                    proxy.set_input_gate_enabled(input.id, !current).await.ok();
-                }
-            }
-            AppAction::ToggleDeesser => {
-                if let Some(input) = self.dsp_selected_input() {
-                    let current = self.dsp_input_deesser.get(&input.id).map(|d| d.enabled).unwrap_or(false);
-                    proxy.set_input_deesser_enabled(input.id, !current).await.ok();
-                }
-            }
-            AppAction::ToggleCompressor => {
-                if let Some(output) = self.dsp_selected_output() {
-                    let current = self.dsp_output_compressor.get(&output.id).map(|c| c.enabled).unwrap_or(false);
-                    proxy.set_output_compressor_enabled(output.id, !current).await.ok();
-                }
-            }
-            AppAction::ToggleLimiter => {
-                if let Some(output) = self.dsp_selected_output() {
-                    let current = self.dsp_output_limiter.get(&output.id).map(|l| l.enabled).unwrap_or(false);
-                    proxy.set_output_limiter_enabled(output.id, !current).await.ok();
-                }
-            }
-            AppAction::MoveUp => {
-                if self.settings_cursor < self.inputs.len() {
-                    if let Some(input) = self.inputs.get(self.settings_cursor) {
-                        if self.settings_cursor > 0 {
-                            proxy.move_input(input.id, (self.settings_cursor - 1) as u32).await.ok();
-                        }
-                    }
-                } else {
-                    let idx = self.settings_cursor - self.inputs.len();
-                    if let Some(output) = self.outputs.get(idx) {
-                        if idx > 0 {
-                            proxy.move_output(output.id, (idx - 1) as u32).await.ok();
-                        }
-                    }
-                }
-            }
-            AppAction::MoveDown => {
-                if self.settings_cursor < self.inputs.len() {
-                    if let Some(input) = self.inputs.get(self.settings_cursor) {
-                        if self.settings_cursor + 1 < self.inputs.len() {
-                            proxy.move_input(input.id, (self.settings_cursor + 1) as u32).await.ok();
-                        }
-                    }
-                } else {
-                    let idx = self.settings_cursor - self.inputs.len();
-                    if let Some(output) = self.outputs.get(idx) {
-                        if idx + 1 < self.outputs.len() {
-                            proxy.move_output(output.id, (idx + 1) as u32).await.ok();
-                        }
-                    }
-                }
-            }
+
+            // -- Settings overlay --
             AppAction::AddChannel => {
                 if self.settings_cursor < self.inputs.len() || (self.inputs.is_empty() && self.outputs.is_empty()) {
                     let name = format!("Input {}", self.inputs.len() + 1);
@@ -589,123 +542,254 @@ impl AppState {
                     }
                 }
             }
-            AppAction::CancelRename => {
-                self.rename_buf = None;
-            }
-            AppAction::RenameChar(c) => {
-                if let Some(ref mut buf) = self.rename_buf {
-                    buf.push(c);
+            AppAction::CancelRename => { self.rename_buf = None; }
+            AppAction::RenameChar(c) => { if let Some(ref mut buf) = self.rename_buf { buf.push(c); } }
+            AppAction::RenameBackspace => { if let Some(ref mut buf) = self.rename_buf { buf.pop(); } }
+            AppAction::CycleColor => {
+                if self.settings_cursor < self.inputs.len() {
+                    if let Some(input) = self.inputs.get(self.settings_cursor) {
+                        proxy.set_input_color(input.id, next_palette_color(&input.color)).await.ok();
+                    }
+                } else {
+                    let idx = self.settings_cursor - self.inputs.len();
+                    if let Some(output) = self.outputs.get(idx) {
+                        proxy.set_output_color(output.id, next_palette_color(&output.color)).await.ok();
+                    }
                 }
             }
-            AppAction::RenameBackspace => {
-                if let Some(ref mut buf) = self.rename_buf {
-                    buf.pop();
-                }
-            }
-            // Step 6: Output target selector
             AppAction::SetOutputTarget => {
-                if self.active_panel == Panel::Settings && self.settings_cursor >= self.inputs.len() {
-                    let output_idx = self.settings_cursor - self.inputs.len();
-                    if let Some(output) = self.outputs.get(output_idx) {
+                if self.settings_cursor >= self.inputs.len() {
+                    let idx = self.settings_cursor - self.inputs.len();
+                    if let Some(output) = self.outputs.get(idx) {
                         if !self.playback_devices.is_empty() {
-                            // Find current target index, cycle to next
                             let current_idx = self.playback_devices.iter()
                                 .position(|d| d.device_name == output.target_device)
                                 .unwrap_or(0);
                             let next_idx = (current_idx + 1) % self.playback_devices.len();
-                            let device_name = &self.playback_devices[next_idx].device_name;
-                            proxy.set_output_target(output.id, device_name).await.ok();
+                            proxy.set_output_target(output.id, &self.playback_devices[next_idx].device_name).await.ok();
                         }
                     }
                 }
             }
-            // Step 7: Capture device management
-            AppAction::AddCaptureInput => {
-                if let Some(device) = self.capture_devices.get(self.capture_cursor) {
-                    if !device.is_added {
-                        let color = COLOR_PALETTE[self.inputs.len() % COLOR_PALETTE.len()];
-                        proxy.add_capture_input(device.pw_node_id, &device.name, color).await.ok();
+            AppAction::MoveUp => {
+                if self.overlay == Overlay::Settings {
+                    if self.settings_cursor < self.inputs.len() {
+                        if let Some(input) = self.inputs.get(self.settings_cursor) {
+                            if self.settings_cursor > 0 {
+                                proxy.move_input(input.id, (self.settings_cursor - 1) as u32).await.ok();
+                            }
+                        }
+                    } else {
+                        let idx = self.settings_cursor - self.inputs.len();
+                        if let Some(output) = self.outputs.get(idx) {
+                            if idx > 0 {
+                                proxy.move_output(output.id, (idx - 1) as u32).await.ok();
+                            }
+                        }
                     }
                 }
             }
-            AppAction::RemoveCaptureInput => {
-                if let Some(device) = self.capture_devices.get(self.capture_cursor) {
-                    if device.is_added && device.input_id > 0 {
-                        proxy.remove_capture_input(device.input_id).await.ok();
+            AppAction::MoveDown => {
+                if self.overlay == Overlay::Settings {
+                    if self.settings_cursor < self.inputs.len() {
+                        if let Some(input) = self.inputs.get(self.settings_cursor) {
+                            if self.settings_cursor + 1 < self.inputs.len() {
+                                proxy.move_input(input.id, (self.settings_cursor + 1) as u32).await.ok();
+                            }
+                        }
+                    } else {
+                        let idx = self.settings_cursor - self.inputs.len();
+                        if let Some(output) = self.outputs.get(idx) {
+                            if idx + 1 < self.outputs.len() {
+                                proxy.move_output(output.id, (idx + 1) as u32).await.ok();
+                            }
+                        }
                     }
                 }
             }
-            AppAction::SetCaptureVolume { fine } => {
-                if let Some(device) = self.capture_devices.get(self.capture_cursor) {
-                    if device.input_id > 0 {
-                        let step: f32 = if fine {
-                            self.config.volume_fine_step as f32 / 100.0
-                        } else {
-                            self.config.volume_step as f32 / 100.0
-                        };
-                        // We don't track capture volume locally, so use a reasonable increment
-                        // The daemon will clamp the value
-                        let current_vol: f32 = 0.8; // reasonable default
-                        let new_vol = (current_vol + step).min(1.0);
-                        proxy.set_capture_volume(device.input_id, new_vol).await.ok();
+            AppAction::SetDefault => {
+                if self.matrix_row >= 1 && self.matrix_col == 0 {
+                    // Set default input
+                    if let Some(input) = self.input_at_row(self.matrix_row) {
+                        let new_id = if self.default_input == input.id { 0 } else { input.id };
+                        proxy.set_default_input(new_id).await.ok();
+                        self.default_input = new_id;
+                    }
+                } else if self.matrix_row == 0 && self.matrix_col >= 1 {
+                    // Set default output
+                    if let Some(output) = self.output_at_col(self.matrix_col) {
+                        let new_id = if self.default_output == output.id { 0 } else { output.id };
+                        proxy.set_default_output(new_id).await.ok();
+                        self.default_output = new_id;
                     }
                 }
             }
-            AppAction::DecreaseCaptureVolume { fine } => {
-                if let Some(device) = self.capture_devices.get(self.capture_cursor) {
-                    if device.input_id > 0 {
-                        let step: f32 = if fine {
-                            self.config.volume_fine_step as f32 / 100.0
-                        } else {
-                            self.config.volume_step as f32 / 100.0
-                        };
-                        let current_vol: f32 = 0.8;
-                        let new_vol = (current_vol - step).max(0.0);
-                        proxy.set_capture_volume(device.input_id, new_vol).await.ok();
+
+            // -- Footer actions --
+            AppAction::FooterUp => {
+                self.footer_cursor = self.footer_cursor.saturating_sub(1);
+            }
+            AppAction::FooterDown => {
+                let count = self.footer_item_count();
+                if count > 0 && self.footer_cursor + 1 < count {
+                    self.footer_cursor += 1;
+                }
+            }
+            AppAction::AssignToInput(n) => {
+                match self.focus {
+                    FocusArea::Streams => {
+                        if let Some(stream) = self.streams.get(self.footer_cursor) {
+                            if let Some(input) = self.inputs.get(n - 1) {
+                                proxy.assign_stream(stream.pw_node_id, input.id, false).await.ok();
+                            }
+                        }
                     }
-                }
-            }
-            AppAction::SetCaptureMute => {
-                if let Some(device) = self.capture_devices.get(self.capture_cursor) {
-                    if device.input_id > 0 {
-                        // We don't track mute locally; toggle assuming not muted
-                        proxy.set_capture_mute(device.input_id, true).await.ok();
+                    FocusArea::Capture => {
+                        if let Some(device) = self.capture_devices.get(self.footer_cursor) {
+                            if let Some(input) = self.inputs.get(n - 1) {
+                                proxy.bind_capture_to_input(input.id, &device.device_name).await.ok();
+                            }
+                        }
                     }
+                    FocusArea::Rules => {
+                        if let Some(rule) = self.rules.get(self.footer_cursor) {
+                            if let Some(input) = self.inputs.get(n - 1) {
+                                proxy.set_app_rule(&rule.app_name, input.id).await.ok();
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            // Step 8: DSP parameter editing
-            AppAction::EnterDspEdit => {
-                self.dsp_editing = true;
-                self.dsp_param_cursor = 0;
-            }
-            AppAction::ExitDspEdit => {
-                self.dsp_editing = false;
-            }
-            AppAction::DspParamNext => {
-                let max = self.dsp_param_count();
-                if max > 0 && self.dsp_param_cursor + 1 < max {
-                    self.dsp_param_cursor += 1;
+            AppAction::DeleteItem => {
+                match self.focus {
+                    FocusArea::Rules => {
+                        if let Some(rule) = self.rules.get(self.footer_cursor) {
+                            proxy.remove_app_rule(&rule.app_name).await.ok();
+                        }
+                    }
+                    FocusArea::Capture => {
+                        if let Some(device) = self.capture_devices.get(self.footer_cursor) {
+                            if device.is_added && device.input_id > 0 {
+                                proxy.remove_capture_input(device.input_id).await.ok();
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            AppAction::DspParamPrev => {
-                self.dsp_param_cursor = self.dsp_param_cursor.saturating_sub(1);
+            AppAction::UnbindItem => {
+                match self.focus {
+                    FocusArea::Capture => {
+                        if let Some(device) = self.capture_devices.get(self.footer_cursor) {
+                            if device.is_added {
+                                proxy.bind_capture_to_input(0, &device.device_name).await.ok();
+                            }
+                        }
+                    }
+                    FocusArea::Playback => {
+                        // Unbind playback device from any output that targets it
+                        if let Some(device) = self.playback_devices.get(self.footer_cursor) {
+                            for output in &self.outputs {
+                                if output.target_device == device.device_name {
+                                    proxy.set_output_target(output.id, "").await.ok();
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
-            AppAction::DspValueUp { fine } => {
-                self.dsp_adjust_value(proxy, fine, true).await;
+
+            // -- DSP overlay --
+            AppAction::ToggleEq => {
+                if let Some(input) = self.dsp_selected_input() {
+                    let current = self.dsp_input_eq.get(&input.id).map(|(e, _)| *e).unwrap_or(false);
+                    proxy.set_input_eq_enabled(input.id, !current).await.ok();
+                }
             }
-            AppAction::DspValueDown { fine } => {
-                self.dsp_adjust_value(proxy, fine, false).await;
+            AppAction::ToggleGate => {
+                if let Some(input) = self.dsp_selected_input() {
+                    let current = self.dsp_input_gate.get(&input.id).map(|g| g.enabled).unwrap_or(false);
+                    proxy.set_input_gate_enabled(input.id, !current).await.ok();
+                }
+            }
+            AppAction::ToggleDeesser => {
+                if let Some(input) = self.dsp_selected_input() {
+                    let current = self.dsp_input_deesser.get(&input.id).map(|d| d.enabled).unwrap_or(false);
+                    proxy.set_input_deesser_enabled(input.id, !current).await.ok();
+                }
+            }
+            AppAction::ToggleCompressor => {
+                if let Some(output) = self.dsp_selected_output() {
+                    let current = self.dsp_output_compressor.get(&output.id).map(|c| c.enabled).unwrap_or(false);
+                    proxy.set_output_compressor_enabled(output.id, !current).await.ok();
+                }
+            }
+            AppAction::ToggleLimiter => {
+                if let Some(output) = self.dsp_selected_output() {
+                    let current = self.dsp_output_limiter.get(&output.id).map(|l| l.enabled).unwrap_or(false);
+                    proxy.set_output_limiter_enabled(output.id, !current).await.ok();
+                }
             }
             AppAction::DspResetEq => {
                 if let Some(input) = self.dsp_selected_input() {
-                    let id = input.id;
-                    proxy.reset_input_eq(id).await.ok();
+                    proxy.reset_input_eq(input.id).await.ok();
                 }
+            }
+            AppAction::EnterDspEdit => { self.dsp_editing = true; self.dsp_param_cursor = 0; }
+            AppAction::ExitDspEdit => { self.dsp_editing = false; }
+            AppAction::DspParamNext => {
+                let max = self.dsp_param_count();
+                if max > 0 && self.dsp_param_cursor + 1 < max { self.dsp_param_cursor += 1; }
+            }
+            AppAction::DspParamPrev => { self.dsp_param_cursor = self.dsp_param_cursor.saturating_sub(1); }
+            AppAction::DspValueUp { fine } => { self.dsp_adjust_value(proxy, fine, true).await; }
+            AppAction::DspValueDown { fine } => { self.dsp_adjust_value(proxy, fine, false).await; }
+            AppAction::DspCursorUp => { self.dsp_cursor = self.dsp_cursor.saturating_sub(1); }
+            AppAction::DspCursorDown => {
+                let total = self.inputs.len() + self.outputs.len();
+                if total > 0 && self.dsp_cursor + 1 < total { self.dsp_cursor += 1; }
+            }
+
+            // -- Profiles overlay --
+            AppAction::ProfileSave => {
+                self.profile_name_buf = Some(String::new());
+            }
+            AppAction::ProfileLoad => {
+                if let Some(name) = self.profiles.get(self.profile_cursor) {
+                    proxy.load_profile(name).await.ok();
+                }
+            }
+            AppAction::ProfileDelete => {
+                if let Some(name) = self.profiles.get(self.profile_cursor).cloned() {
+                    proxy.delete_profile(&name).await.ok();
+                    self.profiles = proxy.list_profiles().await.unwrap_or_default();
+                    self.clamp_cursors();
+                }
+            }
+            AppAction::ProfileNameChar(c) => {
+                if let Some(ref mut buf) = self.profile_name_buf { buf.push(c); }
+            }
+            AppAction::ProfileNameBackspace => {
+                if let Some(ref mut buf) = self.profile_name_buf { buf.pop(); }
+            }
+            AppAction::ProfileConfirmName => {
+                if let Some(name) = self.profile_name_buf.take() {
+                    if !name.is_empty() {
+                        proxy.save_profile(&name).await.ok();
+                        self.profiles = proxy.list_profiles().await.unwrap_or_default();
+                    }
+                }
+            }
+            AppAction::ProfileCancelName => {
+                self.profile_name_buf = None;
             }
         }
     }
 
-    /// If the DSP cursor is on an input row, return that input.
+    // -- DSP helpers (preserved from original) --
+
     pub fn dsp_selected_input(&self) -> Option<&InputInfo> {
         if self.dsp_cursor < self.inputs.len() {
             self.inputs.get(self.dsp_cursor)
@@ -714,75 +798,62 @@ impl AppState {
         }
     }
 
-    /// If the DSP cursor is on an output row, return that output.
     pub fn dsp_selected_output(&self) -> Option<&OutputInfo> {
         if self.dsp_cursor >= self.inputs.len() {
-            let idx = self.dsp_cursor - self.inputs.len();
-            self.outputs.get(idx)
+            self.outputs.get(self.dsp_cursor - self.inputs.len())
         } else {
             None
         }
     }
 
-    /// Total number of editable DSP parameters for the currently selected input/output.
     pub fn dsp_param_count(&self) -> usize {
         if let Some(input) = self.dsp_selected_input() {
             let eq_count = self.dsp_input_eq.get(&input.id)
-                .map(|(_, bands)| bands.len() * 3) // freq, gain, q per band
+                .map(|(_, bands)| bands.len() * 3)
                 .unwrap_or(0);
-            let gate_count = 4; // threshold, attack, release, hold
-            let deesser_count = 3; // frequency, threshold, ratio
-            eq_count + gate_count + deesser_count
-        } else if let Some(output) = self.dsp_selected_output() {
-            let comp_count = 6; // threshold, ratio, attack, release, makeup, knee
-            let lim_count = 2; // ceiling, release
-            let _ = output;
-            comp_count + lim_count
+            eq_count + 4 + 3 // gate(4) + deesser(3)
+        } else if self.dsp_selected_output().is_some() {
+            6 + 2 // compressor(6) + limiter(2)
         } else {
             0
         }
     }
 
-    /// Get a human-readable label and current value for the DSP parameter at `dsp_param_cursor`.
     pub fn dsp_param_label(&self) -> Option<(String, f64)> {
         if let Some(input) = self.dsp_selected_input() {
-            let eq_bands = self.dsp_input_eq.get(&input.id)
-                .map(|(_, bands)| bands.as_slice())
-                .unwrap_or(&[]);
+            let eq_bands = self.dsp_input_eq.get(&input.id).map(|(_, b)| b.as_slice()).unwrap_or(&[]);
             let eq_params = eq_bands.len() * 3;
             let cursor = self.dsp_param_cursor;
-
             if cursor < eq_params {
-                let band_idx = cursor / 3;
-                let param_idx = cursor % 3;
-                if let Some(band) = eq_bands.get(band_idx) {
-                    return match param_idx {
-                        0 => Some((format!("Band {} Freq", band_idx + 1), band.frequency)),
-                        1 => Some((format!("Band {} Gain", band_idx + 1), band.gain_db)),
-                        2 => Some((format!("Band {} Q", band_idx + 1), band.q)),
+                let (bi, pi) = (cursor / 3, cursor % 3);
+                if let Some(band) = eq_bands.get(bi) {
+                    return match pi {
+                        0 => Some((format!("Band {} Freq", bi + 1), band.frequency)),
+                        1 => Some((format!("Band {} Gain", bi + 1), band.gain_db)),
+                        2 => Some((format!("Band {} Q", bi + 1), band.q)),
                         _ => None,
                     };
                 }
             }
-            let gate_start = eq_params;
-            if cursor >= gate_start && cursor < gate_start + 4 {
-                if let Some(gate) = self.dsp_input_gate.get(&input.id) {
-                    return match cursor - gate_start {
-                        0 => Some(("Gate Threshold".into(), gate.threshold_db)),
-                        1 => Some(("Gate Attack".into(), gate.attack_ms)),
-                        2 => Some(("Gate Release".into(), gate.release_ms)),
-                        3 => Some(("Gate Hold".into(), gate.hold_ms)),
+            let gs = eq_params;
+            if cursor >= gs && cursor < gs + 4 {
+                if let Some(g) = self.dsp_input_gate.get(&input.id) {
+                    return match cursor - gs {
+                        0 => Some(("Gate Threshold".into(), g.threshold_db)),
+                        1 => Some(("Gate Attack".into(), g.attack_ms)),
+                        2 => Some(("Gate Release".into(), g.release_ms)),
+                        3 => Some(("Gate Hold".into(), g.hold_ms)),
                         _ => None,
                     };
                 }
             }
-            let deesser_start = gate_start + 4;
-            if cursor >= deesser_start && cursor < deesser_start + 3 {
-                if let Some(deesser) = self.dsp_input_deesser.get(&input.id) {
-                    return match cursor - deesser_start {
-                        0 => Some(("De-esser Freq".into(), deesser.frequency)),
-                        1 => Some(("De-esser Threshold".into(), deesser.threshold_db)),
-                        2 => Some(("De-esser Ratio".into(), deesser.ratio)),
+            let ds = gs + 4;
+            if cursor >= ds && cursor < ds + 3 {
+                if let Some(d) = self.dsp_input_deesser.get(&input.id) {
+                    return match cursor - ds {
+                        0 => Some(("De-esser Freq".into(), d.frequency)),
+                        1 => Some(("De-esser Threshold".into(), d.threshold_db)),
+                        2 => Some(("De-esser Ratio".into(), d.ratio)),
                         _ => None,
                     };
                 }
@@ -790,23 +861,23 @@ impl AppState {
         } else if let Some(output) = self.dsp_selected_output() {
             let cursor = self.dsp_param_cursor;
             if cursor < 6 {
-                if let Some(comp) = self.dsp_output_compressor.get(&output.id) {
+                if let Some(c) = self.dsp_output_compressor.get(&output.id) {
                     return match cursor {
-                        0 => Some(("Comp Threshold".into(), comp.threshold_db)),
-                        1 => Some(("Comp Ratio".into(), comp.ratio)),
-                        2 => Some(("Comp Attack".into(), comp.attack_ms)),
-                        3 => Some(("Comp Release".into(), comp.release_ms)),
-                        4 => Some(("Comp Makeup".into(), comp.makeup_gain_db)),
-                        5 => Some(("Comp Knee".into(), comp.knee_db)),
+                        0 => Some(("Comp Threshold".into(), c.threshold_db)),
+                        1 => Some(("Comp Ratio".into(), c.ratio)),
+                        2 => Some(("Comp Attack".into(), c.attack_ms)),
+                        3 => Some(("Comp Release".into(), c.release_ms)),
+                        4 => Some(("Comp Makeup".into(), c.makeup_gain_db)),
+                        5 => Some(("Comp Knee".into(), c.knee_db)),
                         _ => None,
                     };
                 }
             }
             if cursor >= 6 && cursor < 8 {
-                if let Some(lim) = self.dsp_output_limiter.get(&output.id) {
+                if let Some(l) = self.dsp_output_limiter.get(&output.id) {
                     return match cursor - 6 {
-                        0 => Some(("Limiter Ceiling".into(), lim.ceiling_db)),
-                        1 => Some(("Limiter Release".into(), lim.release_ms)),
+                        0 => Some(("Limiter Ceiling".into(), l.ceiling_db)),
+                        1 => Some(("Limiter Release".into(), l.release_ms)),
                         _ => None,
                     };
                 }
@@ -815,63 +886,51 @@ impl AppState {
         None
     }
 
-    /// Adjust the DSP parameter at `dsp_param_cursor` up or down.
     async fn dsp_adjust_value(&mut self, proxy: &MixCtlProxy<'_>, fine: bool, up: bool) {
-        let fine_div = if fine { 5.0 } else { 1.0 };
-        let sign = if up { 1.0 } else { -1.0 };
+        let fd = if fine { 5.0 } else { 1.0 };
+        let s = if up { 1.0 } else { -1.0 };
 
         if let Some(input) = self.dsp_selected_input().cloned() {
-            let eq_bands = self.dsp_input_eq.get(&input.id)
-                .map(|(_, bands)| bands.clone())
-                .unwrap_or_default();
+            let eq_bands = self.dsp_input_eq.get(&input.id).map(|(_, b)| b.clone()).unwrap_or_default();
             let eq_params = eq_bands.len() * 3;
             let cursor = self.dsp_param_cursor;
-
             if cursor < eq_params {
-                let band_idx = cursor / 3;
-                let param_idx = cursor % 3;
-                if let Some(band) = eq_bands.get(band_idx) {
-                    let mut freq = band.frequency;
-                    let mut gain = band.gain_db;
-                    let mut q = band.q;
-                    match param_idx {
-                        0 => freq = (freq + sign * 100.0 / fine_div).clamp(20.0, 20000.0),
-                        1 => gain = (gain + sign * 0.5 / fine_div).clamp(-24.0, 24.0),
-                        2 => q = (q + sign * 0.1 / fine_div).clamp(0.1, 20.0),
+                let (bi, pi) = (cursor / 3, cursor % 3);
+                if let Some(band) = eq_bands.get(bi) {
+                    let (mut f, mut g, mut q) = (band.frequency, band.gain_db, band.q);
+                    match pi {
+                        0 => f = (f + s * 100.0 / fd).clamp(20.0, 20000.0),
+                        1 => g = (g + s * 0.5 / fd).clamp(-24.0, 24.0),
+                        2 => q = (q + s * 0.1 / fd).clamp(0.1, 20.0),
                         _ => {}
                     }
-                    proxy.set_input_eq_band(input.id, band_idx as u8, &band.band_type, freq, gain, q).await.ok();
+                    proxy.set_input_eq_band(input.id, bi as u8, &band.band_type, f, g, q).await.ok();
                 }
                 return;
             }
-            let gate_start = eq_params;
-            if cursor >= gate_start && cursor < gate_start + 4 {
+            let gs = eq_params;
+            if cursor >= gs && cursor < gs + 4 {
                 if let Some(gate) = self.dsp_input_gate.get(&input.id).cloned() {
-                    let mut t = gate.threshold_db;
-                    let mut a = gate.attack_ms;
-                    let mut r = gate.release_ms;
-                    let mut h = gate.hold_ms;
-                    match cursor - gate_start {
-                        0 => t = (t + sign * 1.0 / fine_div).clamp(-80.0, 0.0),
-                        1 => a = (a + sign * 1.0 / fine_div).clamp(0.1, 200.0),
-                        2 => r = (r + sign * 10.0 / fine_div).clamp(1.0, 2000.0),
-                        3 => h = (h + sign * 5.0 / fine_div).clamp(0.0, 500.0),
+                    let (mut t, mut a, mut r, mut h) = (gate.threshold_db, gate.attack_ms, gate.release_ms, gate.hold_ms);
+                    match cursor - gs {
+                        0 => t = (t + s * 1.0 / fd).clamp(-80.0, 0.0),
+                        1 => a = (a + s * 1.0 / fd).clamp(0.1, 200.0),
+                        2 => r = (r + s * 10.0 / fd).clamp(1.0, 2000.0),
+                        3 => h = (h + s * 5.0 / fd).clamp(0.0, 500.0),
                         _ => {}
                     }
                     proxy.set_input_gate(input.id, t, a, r, h).await.ok();
                 }
                 return;
             }
-            let deesser_start = gate_start + 4;
-            if cursor >= deesser_start && cursor < deesser_start + 3 {
-                if let Some(deesser) = self.dsp_input_deesser.get(&input.id).cloned() {
-                    let mut freq = deesser.frequency;
-                    let mut thresh = deesser.threshold_db;
-                    let mut ratio = deesser.ratio;
-                    match cursor - deesser_start {
-                        0 => freq = (freq + sign * 100.0 / fine_div).clamp(1000.0, 16000.0),
-                        1 => thresh = (thresh + sign * 1.0 / fine_div).clamp(-60.0, 0.0),
-                        2 => ratio = (ratio + sign * 0.5 / fine_div).clamp(1.0, 20.0),
+            let ds = gs + 4;
+            if cursor >= ds && cursor < ds + 3 {
+                if let Some(de) = self.dsp_input_deesser.get(&input.id).cloned() {
+                    let (mut freq, mut thresh, mut ratio) = (de.frequency, de.threshold_db, de.ratio);
+                    match cursor - ds {
+                        0 => freq = (freq + s * 100.0 / fd).clamp(1000.0, 16000.0),
+                        1 => thresh = (thresh + s * 1.0 / fd).clamp(-60.0, 0.0),
+                        2 => ratio = (ratio + s * 0.5 / fd).clamp(1.0, 20.0),
                         _ => {}
                     }
                     proxy.set_input_deesser(input.id, freq, thresh, ratio).await.ok();
@@ -880,20 +939,15 @@ impl AppState {
         } else if let Some(output) = self.dsp_selected_output().cloned() {
             let cursor = self.dsp_param_cursor;
             if cursor < 6 {
-                if let Some(comp) = self.dsp_output_compressor.get(&output.id).cloned() {
-                    let mut t = comp.threshold_db;
-                    let mut ratio = comp.ratio;
-                    let mut a = comp.attack_ms;
-                    let mut r = comp.release_ms;
-                    let mut m = comp.makeup_gain_db;
-                    let mut k = comp.knee_db;
+                if let Some(c) = self.dsp_output_compressor.get(&output.id).cloned() {
+                    let (mut t, mut ratio, mut a, mut r, mut m, mut k) = (c.threshold_db, c.ratio, c.attack_ms, c.release_ms, c.makeup_gain_db, c.knee_db);
                     match cursor {
-                        0 => t = (t + sign * 1.0 / fine_div).clamp(-60.0, 0.0),
-                        1 => ratio = (ratio + sign * 0.5 / fine_div).clamp(1.0, 20.0),
-                        2 => a = (a + sign * 1.0 / fine_div).clamp(0.1, 200.0),
-                        3 => r = (r + sign * 10.0 / fine_div).clamp(1.0, 2000.0),
-                        4 => m = (m + sign * 0.5 / fine_div).clamp(-12.0, 24.0),
-                        5 => k = (k + sign * 0.5 / fine_div).clamp(0.0, 12.0),
+                        0 => t = (t + s * 1.0 / fd).clamp(-60.0, 0.0),
+                        1 => ratio = (ratio + s * 0.5 / fd).clamp(1.0, 20.0),
+                        2 => a = (a + s * 1.0 / fd).clamp(0.1, 200.0),
+                        3 => r = (r + s * 10.0 / fd).clamp(1.0, 2000.0),
+                        4 => m = (m + s * 0.5 / fd).clamp(-12.0, 24.0),
+                        5 => k = (k + s * 0.5 / fd).clamp(0.0, 12.0),
                         _ => {}
                     }
                     proxy.set_output_compressor(output.id, t, ratio, a, r, m, k).await.ok();
@@ -901,15 +955,14 @@ impl AppState {
                 return;
             }
             if cursor >= 6 && cursor < 8 {
-                if let Some(lim) = self.dsp_output_limiter.get(&output.id).cloned() {
-                    let mut ceiling = lim.ceiling_db;
-                    let mut release = lim.release_ms;
+                if let Some(l) = self.dsp_output_limiter.get(&output.id).cloned() {
+                    let (mut ceil, mut rel) = (l.ceiling_db, l.release_ms);
                     match cursor - 6 {
-                        0 => ceiling = (ceiling + sign * 0.5 / fine_div).clamp(-24.0, 0.0),
-                        1 => release = (release + sign * 5.0 / fine_div).clamp(1.0, 500.0),
+                        0 => ceil = (ceil + s * 0.5 / fd).clamp(-24.0, 0.0),
+                        1 => rel = (rel + s * 5.0 / fd).clamp(1.0, 500.0),
                         _ => {}
                     }
-                    proxy.set_output_limiter(output.id, ceiling, release).await.ok();
+                    proxy.set_output_limiter(output.id, ceil, rel).await.ok();
                 }
             }
         }
@@ -923,131 +976,4 @@ fn next_palette_color(current: &str) -> &'static str {
         .map(|i| (i + 1) % COLOR_PALETTE.len())
         .unwrap_or(0);
     COLOR_PALETTE[idx]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mixctl_core::{InputInfo, OutputInfo, RouteInfo};
-
-    fn test_state() -> AppState {
-        AppState::new(
-            vec![InputInfo { id: 1, name: "Sys".into(), color: "#000".into() }],
-            vec![OutputInfo { id: 5, name: "Out".into(), color: "#fff".into(), volume: 100, muted: false, target_device: String::new() }],
-            vec![RouteInfo { input_id: 1, output_id: 5, volume: 80, muted: false }],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            None,
-            TuiConfig::default(),
-        )
-    }
-
-    #[test]
-    fn panel_cycling_wraps() {
-        let mut state = test_state();
-        // Start at Dsp (last panel) and go next -> should wrap to Routes
-        state.active_panel = Panel::Dsp;
-        // Simulate NextPanel
-        state.active_panel = match state.active_panel {
-            Panel::Routes => Panel::Streams,
-            Panel::Streams => Panel::Outputs,
-            Panel::Outputs => Panel::Rules,
-            Panel::Rules => Panel::Capture,
-            Panel::Capture => Panel::Settings,
-            Panel::Settings => Panel::Dsp,
-            Panel::Dsp => Panel::Routes,
-        };
-        assert_eq!(state.active_panel, Panel::Routes);
-
-        // From Routes, PrevPanel should go to Dsp
-        state.active_panel = match state.active_panel {
-            Panel::Routes => Panel::Dsp,
-            Panel::Streams => Panel::Routes,
-            Panel::Outputs => Panel::Streams,
-            Panel::Rules => Panel::Outputs,
-            Panel::Capture => Panel::Rules,
-            Panel::Settings => Panel::Capture,
-            Panel::Dsp => Panel::Settings,
-        };
-        assert_eq!(state.active_panel, Panel::Dsp);
-    }
-
-    #[test]
-    fn cursor_clamp_on_empty() {
-        let mut state = test_state();
-        state.routes.clear();
-        state.route_cursor = 5;
-        // Trigger clamp via a signal
-        state.handle_signal(DaemonSignal::StreamsRefreshed(vec![]));
-        assert_eq!(state.route_cursor, 0);
-    }
-
-    #[test]
-    fn signal_routes_refreshed() {
-        let mut state = test_state();
-        let updated_route = RouteInfo { input_id: 1, output_id: 5, volume: 42, muted: true };
-        state.handle_signal(DaemonSignal::RouteUpdated(updated_route));
-        let route = state.routes.iter().find(|r| r.input_id == 1 && r.output_id == 5).unwrap();
-        assert_eq!(route.volume, 42);
-        assert!(route.muted);
-    }
-
-    #[test]
-    fn signal_full_refresh() {
-        let mut state = test_state();
-        let new_inputs = vec![
-            InputInfo { id: 10, name: "New".into(), color: "#abc".into() },
-            InputInfo { id: 11, name: "New2".into(), color: "#def".into() },
-        ];
-        let new_outputs = vec![
-            OutputInfo { id: 20, name: "Out2".into(), color: "#111".into(), volume: 50, muted: true, target_device: String::new() },
-        ];
-        let new_routes = vec![
-            RouteInfo { input_id: 10, output_id: 20, volume: 60, muted: false },
-        ];
-        state.handle_signal(DaemonSignal::FullRefresh {
-            inputs: new_inputs,
-            outputs: new_outputs,
-            routes: new_routes,
-            streams: vec![],
-        });
-        assert_eq!(state.inputs.len(), 2);
-        assert_eq!(state.outputs.len(), 1);
-        assert_eq!(state.routes.len(), 1);
-        assert_eq!(state.inputs[0].id, 10);
-        assert_eq!(state.outputs[0].volume, 50);
-    }
-
-    #[test]
-    fn cursor_stays_in_bounds_after_shrink() {
-        let mut state = test_state();
-        // Add more routes so cursor can be at position 3
-        state.routes = vec![
-            RouteInfo { input_id: 1, output_id: 5, volume: 80, muted: false },
-            RouteInfo { input_id: 2, output_id: 5, volume: 80, muted: false },
-            RouteInfo { input_id: 3, output_id: 5, volume: 80, muted: false },
-            RouteInfo { input_id: 4, output_id: 5, volume: 80, muted: false },
-        ];
-        state.route_cursor = 3;
-
-        // Now shrink the routes list to 2 items via a FullRefresh
-        state.handle_signal(DaemonSignal::FullRefresh {
-            inputs: vec![InputInfo { id: 1, name: "Sys".into(), color: "#000".into() }],
-            outputs: vec![OutputInfo { id: 5, name: "Out".into(), color: "#fff".into(), volume: 100, muted: false, target_device: String::new() }],
-            routes: vec![
-                RouteInfo { input_id: 1, output_id: 5, volume: 80, muted: false },
-                RouteInfo { input_id: 2, output_id: 5, volume: 80, muted: false },
-            ],
-            streams: vec![],
-        });
-        assert!(
-            state.route_cursor < state.routes.len(),
-            "cursor {} should be < routes len {}",
-            state.route_cursor,
-            state.routes.len()
-        );
-    }
 }

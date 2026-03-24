@@ -2,10 +2,10 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem};
 
 use super::parse_color;
-use crate::app::{AppState, Panel};
+use crate::app::{AppState, Overlay};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let is_active = matches!(state.active_panel, Panel::Settings);
+    let is_active = matches!(state.overlay, Overlay::Settings);
     let border_style = if is_active {
         Style::default().fg(Color::Cyan)
     } else {

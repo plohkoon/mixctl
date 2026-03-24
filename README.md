@@ -1,6 +1,6 @@
 # mixctl
 
-A Linux userspace controller for the [Beacn Mix / Mix Create](https://beacn.com/) USB audio mixer. The device has no official Linux support — mixctl aims to fill that gap with a daemon that manages channel configuration, PipeWire audio routing, hardware device control, a CLI, a GTK4 UI, and a system tray applet.
+A Linux userspace controller for the [Beacn Mix / Mix Create](https://beacn.com/) USB audio mixer. The device has no official Linux support — mixctl aims to fill that gap with a daemon that manages channel configuration, PipeWire audio routing, hardware device control, a CLI, a TUI, a desktop UI, and a system tray applet.
 
 ## Project structure
 
@@ -9,8 +9,8 @@ mixctl/
 ├── daemon/                  # Mixer daemon (PipeWire + D-Bus service)
 ├── apps/
 │   ├── cli/                 # Command-line client
-│   ├── ui/                  # GTK4 mixer UI
-│   └── applet/              # System tray applet
+│   ├── tui/                 # Terminal UI (ratatui matrix grid)
+│   └── tauri/               # Desktop UI + system tray applet (React + Tauri)
 ├── crates/
 │   ├── core/                # Shared types + D-Bus interface definition
 │   ├── protocol/            # USB wire protocol (reverse-engineered)
@@ -29,9 +29,9 @@ mixctl/
 ```
                     ┌─── mixctl-cli
                     │
-mixctl-core ◄───────┼─── mixctl-ui
-(D-Bus types)       │
-                    ├─── mixctl-applet
+                    ├─── mixctl-tui
+mixctl-core ◄───────┤
+(D-Bus types)       ├─── mixctl-tauri (desktop UI + applet)
                     │
                     └─── mixctl-beacn-daemon ──► mixctl-beacn-device ──► mixctl-protocol
                                                │                  (USB commands)
@@ -62,8 +62,8 @@ mixctl-beacn-probe ──► mixctl-beacn-device ──► mixctl-protocol
         │ D-Bus                                             │ USB
         ▼                                                   ▼
   mixctl-cli                                        Beacn Mix Create
-  mixctl-ui                                         (4 dials, buttons,
-  mixctl-applet                                      800x480 LCD, LEDs)
+  mixctl-tui                                        (4 dials, buttons,
+  mixctl-tauri                                       800x480 LCD, LEDs)
 ```
 
 The mixer daemon and device daemon are separate processes:
@@ -174,7 +174,6 @@ margin = 12
 [applet]
 window_width = 380
 poll_interval_ms = 30
-open_ui_command = "mixctl-ui"
 
 [cli]
 color_output = true
@@ -218,6 +217,10 @@ mixctl-cli rule set "spotify*" 3
 mixctl-cli config get beacn
 mixctl-cli config set beacn '{"layout":"dial"}'
 
+# Profiles
+mixctl-cli profile save my-setup
+mixctl-cli profile load my-setup
+
 # Live monitoring
 mixctl-cli listen all
 ```
@@ -236,7 +239,13 @@ cargo run -p mixctl-daemon
 cargo run -p mixctl-beacn-daemon          # default column layout
 cargo run -p mixctl-beacn-daemon -- dial  # dial layout
 
-# Terminal 3: CLI
+# Terminal 3: Desktop UI
+cd apps/tauri && npm run tauri dev
+
+# Terminal 4: TUI
+cargo run -p mixctl-tui
+
+# Terminal 5: CLI
 cargo run -p mixctl-cli -- input list
 ```
 
@@ -261,10 +270,14 @@ docker compose run --rm cli cargo run -p mixctl-cli -- status
 ## Building
 
 ```bash
+# Rust components (daemon, CLI, TUI, device daemons)
 cargo build
+
+# Tauri desktop app
+cd apps/tauri && npm install && npm run tauri build
 ```
 
-The daemon requires `libpipewire-0.3-dev` and `libclang-dev`. The CLI, UI, applet, and device daemons build without PipeWire.
+The daemon requires `libpipewire-0.3-dev` and `libclang-dev`. The CLI, TUI, and device daemons build without PipeWire. The Tauri app requires Node.js and system WebView libraries.
 
 ## Tests
 

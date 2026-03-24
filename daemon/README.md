@@ -82,7 +82,6 @@ margin = 12
 [applet]
 window_width = 380
 poll_interval_ms = 30
-open_ui_command = "mixctl-ui"
 
 [cli]
 color_output = true

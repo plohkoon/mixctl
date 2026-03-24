@@ -1,6 +1,6 @@
 # mixctl-core
 
-Shared types and D-Bus interface definition used by the daemon, CLI, UI, and applet.
+Shared types and D-Bus interface definition used by the daemon, CLI, TUI, and desktop UI.
 
 ## Types
 
@@ -24,8 +24,8 @@ Shared configuration structs for component subsections, fetched over D-Bus as JS
 | Type | Fields | Description |
 |---|---|---|
 | `BeacnConfig` | `layout, dial_sensitivity, level_decay` | Beacn hardware daemon settings |
-| `UiConfig` | `window_width, window_height, margin` | GTK4 UI settings |
-| `AppletConfig` | `window_width, poll_interval_ms, open_ui_command` | System tray applet settings |
+| `UiConfig` | `window_width, window_height, margin` | Desktop UI settings |
+| `AppletConfig` | `window_width, poll_interval_ms` | System tray applet settings |
 | `CliConfig` | `color_output, output_format` | CLI output settings |
 
 All types derive `Serialize`, `Deserialize`, `Default`, and `PartialEq`. Each field has `#[serde(default)]` for field-level defaults matching current hardcoded values.

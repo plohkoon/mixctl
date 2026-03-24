@@ -91,7 +91,7 @@ enum ProfileCmd {
     List,
     /// Save current configuration as a named profile
     Save { name: String },
-    /// Load a saved profile (restarts daemon)
+    /// Load a saved profile (applies live)
     Load { name: String },
     /// Delete a saved profile
     Delete { name: String },
@@ -164,6 +164,10 @@ enum OutputCmd {
     SetMute { id: u32, muted: String },
     /// Set an output's target hardware device (empty to clear)
     SetTarget { id: u32, device_name: String },
+    /// Get the default output
+    GetDefault,
+    /// Set the default output (0 to clear)
+    SetDefault { id: u32 },
     /// Manage output compressor
     Compressor {
         #[command(subcommand)]
@@ -399,65 +403,30 @@ async fn main() -> Result<()> {
                 println!("ok");
             }
         },
-        Cmd::Profile { cmd } => {
-            let config_path = dirs::home_dir().expect("no home dir").join(".config/mixctl.toml");
-            let state_path = dirs::home_dir().expect("no home dir").join(".local/state/mixctl.toml");
-            let profiles_dir = dirs::home_dir().expect("no home dir").join(".config/mixctl/profiles");
-
-            match cmd {
-                ProfileCmd::List => {
-                    if !profiles_dir.exists() {
-                        println!("(no profiles saved)");
-                    } else {
-                        let mut found = false;
-                        for entry in std::fs::read_dir(&profiles_dir)? {
-                            let entry = entry?;
-                            if entry.path().is_dir() {
-                                println!("{}", entry.file_name().to_string_lossy());
-                                found = true;
-                            }
-                        }
-                        if !found {
-                            println!("(no profiles saved)");
-                        }
+        Cmd::Profile { cmd } => match cmd {
+            ProfileCmd::List => {
+                let profiles = proxy.list_profiles().await?;
+                if profiles.is_empty() {
+                    println!("(no profiles saved)");
+                } else {
+                    for name in profiles {
+                        println!("{name}");
                     }
-                }
-                ProfileCmd::Save { name } => {
-                    let profile_dir = profiles_dir.join(&name);
-                    std::fs::create_dir_all(&profile_dir)?;
-                    std::fs::copy(&config_path, profile_dir.join("config.toml"))?;
-                    if state_path.exists() {
-                        std::fs::copy(&state_path, profile_dir.join("state.toml"))?;
-                    }
-                    println!("profile '{name}' saved");
-                }
-                ProfileCmd::Load { name } => {
-                    let profile_dir = profiles_dir.join(&name);
-                    if !profile_dir.exists() {
-                        eprintln!("error: profile '{name}' not found");
-                        std::process::exit(1);
-                    }
-                    let profile_config = profile_dir.join("config.toml");
-                    let profile_state = profile_dir.join("state.toml");
-                    if profile_config.exists() {
-                        std::fs::copy(&profile_config, &config_path)?;
-                    }
-                    if profile_state.exists() {
-                        std::fs::copy(&profile_state, &state_path)?;
-                    }
-                    println!("profile '{name}' loaded — restart daemon to apply");
-                }
-                ProfileCmd::Delete { name } => {
-                    let profile_dir = profiles_dir.join(&name);
-                    if !profile_dir.exists() {
-                        eprintln!("error: profile '{name}' not found");
-                        std::process::exit(1);
-                    }
-                    std::fs::remove_dir_all(&profile_dir)?;
-                    println!("profile '{name}' deleted");
                 }
             }
-        }
+            ProfileCmd::Save { name } => {
+                proxy.save_profile(&name).await?;
+                println!("profile '{name}' saved");
+            }
+            ProfileCmd::Load { name } => {
+                proxy.load_profile(&name).await?;
+                println!("profile '{name}' loaded");
+            }
+            ProfileCmd::Delete { name } => {
+                proxy.delete_profile(&name).await?;
+                println!("profile '{name}' deleted");
+            }
+        },
         Cmd::Status => {
             let status = proxy.get_audio_status().await?;
             println!("audio: {status}");
@@ -466,6 +435,12 @@ async fn main() -> Result<()> {
                 println!("default input: {default_input}");
             } else {
                 println!("default input: (none)");
+            }
+            let default_output = proxy.get_default_output().await?;
+            if default_output > 0 {
+                println!("default output: {default_output}");
+            } else {
+                println!("default output: (none)");
             }
             let components = proxy.list_components().await?;
             if components.is_empty() {
@@ -646,6 +621,18 @@ async fn main() -> Result<()> {
             }
             OutputCmd::SetTarget { id, device_name } => {
                 proxy.set_output_target(id, &device_name).await?;
+                println!("ok");
+            }
+            OutputCmd::GetDefault => {
+                let id = proxy.get_default_output().await?;
+                if id > 0 {
+                    println!("{id}");
+                } else {
+                    println!("(none)");
+                }
+            }
+            OutputCmd::SetDefault { id } => {
+                proxy.set_default_output(id).await?;
                 println!("ok");
             }
             OutputCmd::Compressor { cmd } => match cmd {
@@ -884,67 +871,61 @@ async fn main() -> Result<()> {
                     let mut rules_stream = proxy.receive_app_rules_changed().await?;
                     let mut capture_stream = proxy.receive_capture_devices_changed().await?;
                     let mut audio_stream = proxy.receive_audio_status_changed().await?;
+                    let mut playback_stream = proxy.receive_playback_devices_changed().await?;
+                    let mut component_stream = proxy.receive_component_changed().await?;
+                    let mut input_dsp_stream = proxy.receive_input_dsp_changed().await?;
+                    let mut output_dsp_stream = proxy.receive_output_dsp_changed().await?;
+                    let mut profile_stream = proxy.receive_profile_changed().await?;
                     loop {
-                        futures_lite::future::or(
-                            futures_lite::future::or(
-                                futures_lite::future::or(
-                                    futures_lite::future::or(
-                                        async {
-                                            if let Some(signal) = output_state_stream.next().await {
-                                                let id = signal.args().unwrap().id;
-                                                print_output_state_signal(&proxy, id).await;
-                                            }
-                                        },
-                                        async {
-                                            if let Some(signal) = route_stream.next().await {
-                                                let args = signal.args().unwrap();
-                                                print_route_signal(&proxy, args.input_id, args.output_id).await;
-                                            }
-                                        },
-                                    ),
-                                    futures_lite::future::or(
-                                        async {
-                                            if let Some(_) = inputs_config_stream.next().await {
-                                                print_inputs_config_signal(&proxy).await;
-                                            }
-                                        },
-                                        async {
-                                            if let Some(_) = outputs_config_stream.next().await {
-                                                print_outputs_config_signal(&proxy).await;
-                                            }
-                                        },
-                                    ),
-                                ),
-                                futures_lite::future::or(
-                                    async {
-                                        if let Some(_) = streams_stream.next().await {
-                                            println!("streams_changed");
-                                        }
-                                    },
-                                    futures_lite::future::or(
-                                        async {
-                                            if let Some(_) = rules_stream.next().await {
-                                                println!("app_rules_changed");
-                                            }
-                                        },
-                                        async {
-                                            if let Some(_) = capture_stream.next().await {
-                                                println!("capture_devices_changed");
-                                            }
-                                        },
-                                    ),
-                                ),
-                            ),
-                            async {
-                                if let Some(_) = audio_stream.next().await {
-                                    match proxy.get_audio_status().await {
-                                        Ok(status) => println!("audio_status_changed: {status}"),
-                                        Err(e) => println!("audio_status_changed: (fetch failed: {e})"),
-                                    }
+                        tokio::select! {
+                            Some(signal) = output_state_stream.next() => {
+                                let id = signal.args().unwrap().id;
+                                print_output_state_signal(&proxy, id).await;
+                            }
+                            Some(signal) = route_stream.next() => {
+                                let args = signal.args().unwrap();
+                                print_route_signal(&proxy, args.input_id, args.output_id).await;
+                            }
+                            Some(_) = inputs_config_stream.next() => {
+                                print_inputs_config_signal(&proxy).await;
+                            }
+                            Some(_) = outputs_config_stream.next() => {
+                                print_outputs_config_signal(&proxy).await;
+                            }
+                            Some(_) = streams_stream.next() => {
+                                println!("streams_changed");
+                            }
+                            Some(_) = rules_stream.next() => {
+                                println!("app_rules_changed");
+                            }
+                            Some(_) = capture_stream.next() => {
+                                println!("capture_devices_changed");
+                            }
+                            Some(_) = audio_stream.next() => {
+                                match proxy.get_audio_status().await {
+                                    Ok(status) => println!("audio_status_changed: {status}"),
+                                    Err(e) => println!("audio_status_changed: (fetch failed: {e})"),
                                 }
-                            },
-                        )
-                        .await;
+                            }
+                            Some(_) = playback_stream.next() => {
+                                println!("playback_devices_changed");
+                            }
+                            Some(_) = component_stream.next() => {
+                                println!("component_changed");
+                            }
+                            Some(signal) = input_dsp_stream.next() => {
+                                let id = signal.args().unwrap().input_id;
+                                println!("input_dsp_changed: input={id}");
+                            }
+                            Some(signal) = output_dsp_stream.next() => {
+                                let id = signal.args().unwrap().output_id;
+                                println!("output_dsp_changed: output={id}");
+                            }
+                            Some(signal) = profile_stream.next() => {
+                                let name = signal.args().unwrap().name.clone();
+                                println!("profile_changed: {name}");
+                            }
+                        }
                     }
                 }
                 ListenCmd::State => {

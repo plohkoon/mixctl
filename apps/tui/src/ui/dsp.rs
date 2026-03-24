@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use mixctl_core::{compute_eq_curve, EqBandInfo};
 
-use crate::app::{AppState, Panel};
+use crate::app::{AppState, Overlay};
 
 fn enabled_tag(enabled: bool) -> Span<'static> {
     if enabled {
@@ -184,7 +184,7 @@ fn render_eq_curve(frame: &mut Frame, area: Rect, bands: &[EqBandInfo]) {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let is_active = matches!(state.active_panel, Panel::Dsp);
+    let is_active = matches!(state.overlay, Overlay::Dsp);
     let border_style = if is_active {
         Style::default().fg(Color::Cyan)
     } else {
