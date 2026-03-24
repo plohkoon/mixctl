@@ -47,6 +47,7 @@ pub struct PwEngineConfig {
     pub output_targets: Vec<PwOutputTargetConfig>,
     pub capture_inputs: Vec<PwCaptureInputConfig>,
     pub default_input_id: Option<u32>,
+    pub default_output_id: Option<u32>,
     pub broadcast_levels: bool,
 }
 
@@ -202,6 +203,7 @@ fn run_pw_loop(
         metadata: None,
         _metadata_listener: None,
         deferred_default_input: config.default_input_id,
+        deferred_default_output: config.default_output_id,
         routing_ready: false,
         deferred_stream_moves: HashMap::new(),
         routing_wait_start: None,
@@ -379,6 +381,7 @@ struct PwState {
     metadata: Option<pw::metadata::Metadata>,
     _metadata_listener: Option<Box<dyn std::any::Any>>,
     deferred_default_input: Option<u32>,
+    deferred_default_output: Option<u32>,
     /// True once all output→hardware links are active and stream routing is safe.
     /// Prevents yanking streams off hardware sinks before the mixer chain is ready.
     routing_ready: bool,
@@ -506,6 +509,21 @@ fn try_activate_routing(state: &Rc<RefCell<PwState>>) {
         }
     }
 
+    // Apply deferred default output
+    if let Some(output_id) = s.deferred_default_output.take() {
+        if let Some(metadata) = &s.metadata {
+            let target = format!("mixctl.output.{output_id}");
+            let value = format!("{{\"name\": \"{target}\"}}");
+            metadata.set_property(
+                0,
+                "default.audio.source",
+                Some("Spa:String:JSON"),
+                Some(&value),
+            );
+            debug!("set default audio source to output {output_id}");
+        }
+    }
+
     // Route deferred streams
     let deferred = std::mem::take(&mut s.deferred_stream_moves);
     drop(s);
@@ -614,7 +632,7 @@ fn queue_filter_to_output_links(state: &Rc<RefCell<PwState>>, output_ids: &[u32]
                 out_node_name: "mixctl.mixer".to_string(),
                 out_port_name: format!("out_{output_id}_{ch}"),
                 in_node_name: format!("mixctl.output.{output_id}"),
-                in_port_name: format!("playback_{ch}"),
+                in_port_name: format!("input_{ch}"),
             });
         }
     }
@@ -626,7 +644,7 @@ fn queue_output_target_links(state: &Rc<RefCell<PwState>>, output_id: u32, devic
         s.pending_links.push(PendingLink {
             group: format!("output_target:{output_id}"),
             out_node_name: format!("mixctl.output.{output_id}"),
-            out_port_name: format!("monitor_{ch}"),
+            out_port_name: format!("capture_{ch}"),
             in_node_name: device_name.to_string(),
             in_port_name: format!("playback_{ch}"),
         });
@@ -718,6 +736,11 @@ fn handle_metadata_global(
                             value: value.map(|v| v.to_string()),
                         }).ok();
                     }
+                    (0, Some("default.audio.source")) => {
+                        event_sender.send(PwEvent::OriginalDefaultSource {
+                            value: value.map(|v| v.to_string()),
+                        }).ok();
+                    }
                     (id, Some("target.node")) if id != 0 => {
                         if let Some(v) = value {
                             if !v.contains("mixctl.") {
@@ -736,9 +759,9 @@ fn handle_metadata_global(
         .register();
     s._metadata_listener = Some(Box::new(listener));
 
-    // Don't apply deferred_default_input yet — wait for output→hardware links
+    // Don't apply deferred defaults yet — wait for output→hardware links
     // to resolve first, preventing an abrupt stream yank that can crash USB DAC firmware.
-    if s.deferred_default_input.is_some() && s.routing_wait_start.is_none() {
+    if (s.deferred_default_input.is_some() || s.deferred_default_output.is_some()) && s.routing_wait_start.is_none() {
         s.routing_wait_start = Some(Instant::now());
     }
     s.metadata = Some(metadata);
@@ -927,6 +950,10 @@ fn handle_command(
 
         PwCommand::SetDefaultInput { input_id } => {
             set_default_input(state, input_id);
+        }
+
+        PwCommand::SetDefaultOutput { output_id } => {
+            set_default_output(state, output_id);
         }
 
         PwCommand::RenameInputSink { input_id, description } => {
@@ -1175,8 +1202,8 @@ fn handle_command(
             }
         }
 
-        PwCommand::Shutdown { original_default_sink, original_stream_targets } => {
-            cleanup_before_shutdown(state, original_default_sink, &original_stream_targets);
+        PwCommand::Shutdown { original_default_sink, original_default_source, original_stream_targets } => {
+            cleanup_before_shutdown(state, original_default_sink, original_default_source, &original_stream_targets);
             state.borrow_mut().shutdown = true;
             main_loop.quit();
         }
@@ -1190,6 +1217,7 @@ fn handle_command(
 fn cleanup_before_shutdown(
     state: &Rc<RefCell<PwState>>,
     original_default_sink: Option<String>,
+    original_default_source: Option<String>,
     original_stream_targets: &HashMap<u32, String>,
 ) {
     let mut s = state.borrow_mut();
@@ -1213,6 +1241,7 @@ fn cleanup_before_shutdown(
     // WirePlumber will route them to the restored default.
     if let Some(metadata) = &s.metadata {
         metadata.set_property(0, "default.audio.sink", Some("Spa:String:JSON"), original_default_sink.as_deref());
+        metadata.set_property(0, "default.audio.source", Some("Spa:String:JSON"), original_default_source.as_deref());
     }
 
     // Step 4: Tear down the mixer chain from inside out:
@@ -1309,7 +1338,7 @@ fn create_output_source(
         "factory.name" => "support.null-audio-sink",
         "node.name" => node_name.clone(),
         "node.description" => description.to_string(),
-        "media.class" => "Audio/Sink",
+        "media.class" => "Audio/Source/Virtual",
         "audio.position" => "FL,FR,FC,LFE,RL,RR,SL,SR",
         "monitor.channel-volumes" => "true",
         "node.autoconnect" => "false",
@@ -1365,6 +1394,18 @@ fn set_default_input(state: &Rc<RefCell<PwState>>, input_id: u32) {
     } else {
         drop(s);
         state.borrow_mut().deferred_default_input = Some(input_id);
+    }
+}
+
+fn set_default_output(state: &Rc<RefCell<PwState>>, output_id: u32) {
+    let s = state.borrow();
+    if let Some(metadata) = &s.metadata {
+        let target = format!("mixctl.output.{output_id}");
+        let value = format!("{{\"name\": \"{target}\"}}");
+        metadata.set_property(0, "default.audio.source", Some("Spa:String:JSON"), Some(&value));
+    } else {
+        drop(s);
+        state.borrow_mut().deferred_default_output = Some(output_id);
     }
 }
 

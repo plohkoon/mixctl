@@ -124,11 +124,32 @@ fn render_help(frame: &mut Frame, area: Rect) {
   m     Toggle route/output mute
   M     Toggle output master mute
 
+ Settings
+  r     Rename channel
+  c     Cycle colour
+  t     Cycle target device
+  a     Add channel
+  x     Remove channel
+  J/K   Reorder up/down
+
+ Capture
+  a     Add capture input
+  x     Remove capture input
+  h/l   Adjust capture volume
+  m     Toggle capture mute
+
+ DSP
+  Enter  Edit DSP parameters
+  e/g/d  Toggle EQ/gate/de-esser
+  c/l    Toggle compressor/limiter
+  R      Reset EQ
+  (edit) h/l H/L j/k Esc
+
  General
   q     Quit";
 
     let w = 42.min(area.width.saturating_sub(4));
-    let h = 18.min(area.height.saturating_sub(2));
+    let h = 30.min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
     let popup_area = Rect::new(x, y, w, h);

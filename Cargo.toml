@@ -5,6 +5,7 @@ members = [
   "apps/cli",
   "apps/ui",
   "apps/applet",
+  "apps/tauri/src-tauri",
   "crates/core",
   "crates/protocol",
   "crates/display",

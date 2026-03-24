@@ -1,0 +1,228 @@
+import { Button, LineEdit, ScrollView, VerticalBox } from "std-widgets.slint";
+
+export struct ChannelItemData {
+    id: int,
+    name: string,
+    color: string,
+}
+
+export component ChannelsDialog inherits Window {
+    title: "Channels";
+    width: 500px;
+    height: 520px;
+
+    in property <[ChannelItemData]> inputs;
+    in property <[ChannelItemData]> outputs;
+
+    callback add-input(string, string);        // name, color
+    callback remove-input(int);                // id
+    callback move-input(int, int);             // id, position
+    callback rename-input(int, string);        // id, new_name
+
+    callback add-output(string, string, int);  // name, color, source_output_id
+    callback remove-output(int);               // id
+    callback move-output(int, int);            // id, position
+    callback rename-output(int, string);       // id, new_name
+
+    property <string> new-input-name: "";
+    property <string> new-output-name: "";
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+
+        // --- Inputs section ---
+        Text {
+            text: "Inputs";
+            font-weight: 700;
+            font-size: 14px;
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                spacing: 4px;
+
+                for inp[idx] in root.inputs: Rectangle {
+                    height: 36px;
+                    border-radius: 4px;
+                    background: #ffffff10;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 4px;
+                        spacing: 4px;
+                        alignment: center;
+
+                        // Color indicator
+                        Rectangle {
+                            width: 12px;
+                            height: 12px;
+                            border-radius: 6px;
+                            // Parse color from hex string at the Slint level
+                            // We use a simple workaround: pass as brush from Rust
+                            background: #888;
+                        }
+
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            text: inp.name;
+                            accepted(text) => {
+                                root.rename-input(inp.id, text);
+                            }
+                        }
+
+                        // Move up
+                        Button {
+                            text: "\u{25B2}";
+                            enabled: idx > 0;
+                            clicked => {
+                                root.move-input(inp.id, idx - 1);
+                            }
+                        }
+
+                        // Move down
+                        Button {
+                            text: "\u{25BC}";
+                            enabled: idx < root.inputs.length - 1;
+                            clicked => {
+                                root.move-input(inp.id, idx + 1);
+                            }
+                        }
+
+                        // Remove
+                        Button {
+                            text: "\u{2715}";
+                            clicked => {
+                                root.remove-input(inp.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add input row
+        HorizontalLayout {
+            spacing: 4px;
+
+            LineEdit {
+                horizontal-stretch: 1;
+                text: root.new-input-name;
+                placeholder-text: "New input name";
+                edited(text) => {
+                    root.new-input-name = text;
+                }
+            }
+
+            Button {
+                text: "Add Input";
+                enabled: root.new-input-name != "";
+                clicked => {
+                    root.add-input(root.new-input-name, "#4A90D9");
+                    root.new-input-name = "";
+                }
+            }
+        }
+
+        // Separator
+        Rectangle {
+            height: 1px;
+            background: #555;
+        }
+
+        // --- Outputs section ---
+        Text {
+            text: "Outputs";
+            font-weight: 700;
+            font-size: 14px;
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                spacing: 4px;
+
+                for out[idx] in root.outputs: Rectangle {
+                    height: 36px;
+                    border-radius: 4px;
+                    background: #ffffff10;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 4px;
+                        spacing: 4px;
+                        alignment: center;
+
+                        // Color indicator
+                        Rectangle {
+                            width: 12px;
+                            height: 12px;
+                            border-radius: 6px;
+                            background: #888;
+                        }
+
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            text: out.name;
+                            accepted(text) => {
+                                root.rename-output(out.id, text);
+                            }
+                        }
+
+                        // Move up
+                        Button {
+                            text: "\u{25B2}";
+                            enabled: idx > 0;
+                            clicked => {
+                                root.move-output(out.id, idx - 1);
+                            }
+                        }
+
+                        // Move down
+                        Button {
+                            text: "\u{25BC}";
+                            enabled: idx < root.outputs.length - 1;
+                            clicked => {
+                                root.move-output(out.id, idx + 1);
+                            }
+                        }
+
+                        // Remove
+                        Button {
+                            text: "\u{2715}";
+                            clicked => {
+                                root.remove-output(out.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add output row
+        HorizontalLayout {
+            spacing: 4px;
+
+            LineEdit {
+                horizontal-stretch: 1;
+                text: root.new-output-name;
+                placeholder-text: "New output name";
+                edited(text) => {
+                    root.new-output-name = text;
+                }
+            }
+
+            Button {
+                text: "Add Output";
+                enabled: root.new-output-name != "";
+                clicked => {
+                    root.add-output(root.new-output-name, "#E74C3C", 0);
+                    root.new-output-name = "";
+                }
+            }
+        }
+    }
+}

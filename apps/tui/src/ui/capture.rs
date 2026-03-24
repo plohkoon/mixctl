@@ -33,6 +33,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             let is_selected = is_active && i == state.capture_cursor;
             let cursor = if is_selected { "\u{25b8} " } else { "  " };
 
+            let added_indicator = if device.is_added {
+                Span::styled("[+] ", Style::default().fg(Color::Green))
+            } else {
+                Span::styled("[ ] ", Style::default().fg(Color::DarkGray))
+            };
+
             let bound_spans = if device.input_id > 0 {
                 let (input_name, input_color) = find_input_display(&state.inputs, device.input_id);
                 vec![
@@ -47,6 +53,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
             let mut spans = vec![
                 Span::raw(cursor),
+                added_indicator,
                 Span::styled(
                     format!("{:<16}", device.name),
                     Style::default().fg(if is_selected { Color::White } else { Color::Gray }),
@@ -59,6 +66,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         .collect();
 
     let hint = Line::from(vec![
+        Span::styled("a", Style::default().fg(Color::Yellow)),
+        Span::raw(": add  "),
+        Span::styled("x", Style::default().fg(Color::Yellow)),
+        Span::raw(": remove  "),
+        Span::styled("h/l", Style::default().fg(Color::Yellow)),
+        Span::raw(": volume  "),
+        Span::styled("m", Style::default().fg(Color::Yellow)),
+        Span::raw(": mute  "),
         Span::styled("1-9", Style::default().fg(Color::Yellow)),
         Span::raw(": bind  "),
         Span::styled("u", Style::default().fg(Color::Yellow)),

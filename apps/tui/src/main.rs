@@ -44,10 +44,11 @@ async fn main() -> Result<()> {
 
 async fn run_with_reconnect(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     let mut events = EventStream::new();
+    let mut reconnect_delay_secs: u64 = 2; // default, updated after first successful connect
 
     loop {
         // Try connecting to daemon
-        let connect_result = try_connect_and_run(terminal, &mut events).await;
+        let connect_result = try_connect_and_run(terminal, &mut events, &mut reconnect_delay_secs).await;
 
         match connect_result {
             Ok(()) => return Ok(()), // clean quit
@@ -64,7 +65,7 @@ async fn run_with_reconnect(terminal: &mut Terminal<CrosstermBackend<io::Stdout>
                     })?;
 
                     // Check for quit key or wait before retry
-                    let timeout = tokio::time::sleep(Duration::from_secs(2));
+                    let timeout = tokio::time::sleep(Duration::from_secs(reconnect_delay_secs));
                     tokio::pin!(timeout);
 
                     tokio::select! {
@@ -89,10 +90,12 @@ async fn run_with_reconnect(terminal: &mut Terminal<CrosstermBackend<io::Stdout>
 async fn try_connect_and_run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     events: &mut EventStream,
+    reconnect_delay_secs: &mut u64,
 ) -> Result<()> {
     let (proxy, mut state) = dbus::connect_and_load().await?;
+    *reconnect_delay_secs = state.config.reconnect_delay_secs;
     let mut signal_rx = dbus::subscribe_signals(&proxy).await?;
-    let mut ping_interval = tokio::time::interval(Duration::from_secs(3));
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(state.config.ping_interval_secs));
     ping_interval.tick().await; // skip first immediate tick
 
     loop {

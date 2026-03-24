@@ -191,6 +191,48 @@ fn default_output_format() -> String {
     "text".into()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TuiConfig {
+    #[serde(default = "default_volume_step")]
+    pub volume_step: u8,
+    #[serde(default = "default_volume_fine_step")]
+    pub volume_fine_step: u8,
+    #[serde(default = "default_initial_panel")]
+    pub initial_panel: String,
+    #[serde(default = "default_ping_interval_secs")]
+    pub ping_interval_secs: u64,
+    #[serde(default = "default_reconnect_delay_secs")]
+    pub reconnect_delay_secs: u64,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            volume_step: default_volume_step(),
+            volume_fine_step: default_volume_fine_step(),
+            initial_panel: default_initial_panel(),
+            ping_interval_secs: default_ping_interval_secs(),
+            reconnect_delay_secs: default_reconnect_delay_secs(),
+        }
+    }
+}
+
+fn default_volume_step() -> u8 {
+    5
+}
+fn default_volume_fine_step() -> u8 {
+    1
+}
+fn default_initial_panel() -> String {
+    "routes".into()
+}
+fn default_ping_interval_secs() -> u64 {
+    3
+}
+fn default_reconnect_delay_secs() -> u64 {
+    2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,6 +13,9 @@ pub enum PwCommand {
     SetDefaultInput {
         input_id: u32,
     },
+    SetDefaultOutput {
+        output_id: u32,
+    },
     RenameInputSink {
         input_id: u32,
         description: String,
@@ -99,6 +102,7 @@ pub enum PwCommand {
     /// Graceful shutdown of the PipeWire thread.
     Shutdown {
         original_default_sink: Option<String>,
+        original_default_source: Option<String>,
         original_stream_targets: std::collections::HashMap<u32, String>,
     },
 }

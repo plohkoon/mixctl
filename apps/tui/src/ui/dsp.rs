@@ -410,18 +410,49 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         items.push(ListItem::new(Line::from("")));
     }
 
-    let hint = Line::from(vec![
-        Span::styled("e", Style::default().fg(Color::Yellow)),
-        Span::raw(": EQ  "),
-        Span::styled("g", Style::default().fg(Color::Yellow)),
-        Span::raw(": gate  "),
-        Span::styled("d", Style::default().fg(Color::Yellow)),
-        Span::raw(": de-esser  "),
-        Span::styled("c", Style::default().fg(Color::Yellow)),
-        Span::raw(": compressor  "),
-        Span::styled("l", Style::default().fg(Color::Yellow)),
-        Span::raw(": limiter"),
-    ]);
+    // Show current editing parameter when in DSP edit mode
+    if state.dsp_editing {
+        if let Some((label, value)) = state.dsp_param_label() {
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("  \u{25b6} Editing: {} = {:.2}", label, value),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+            ])));
+        }
+    }
+
+    let hint = if state.dsp_editing {
+        Line::from(vec![
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::raw(": param  "),
+            Span::styled("h/l", Style::default().fg(Color::Yellow)),
+            Span::raw(": adjust  "),
+            Span::styled("H/L", Style::default().fg(Color::Yellow)),
+            Span::raw(": fine  "),
+            Span::styled("R", Style::default().fg(Color::Yellow)),
+            Span::raw(": reset EQ  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(": done"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(": edit  "),
+            Span::styled("e", Style::default().fg(Color::Yellow)),
+            Span::raw(": EQ  "),
+            Span::styled("g", Style::default().fg(Color::Yellow)),
+            Span::raw(": gate  "),
+            Span::styled("d", Style::default().fg(Color::Yellow)),
+            Span::raw(": de-esser  "),
+            Span::styled("c", Style::default().fg(Color::Yellow)),
+            Span::raw(": compressor  "),
+            Span::styled("l", Style::default().fg(Color::Yellow)),
+            Span::raw(": limiter  "),
+            Span::styled("R", Style::default().fg(Color::Yellow)),
+            Span::raw(": reset EQ"),
+        ])
+    };
 
     let list = List::new(items).block(
         block.title_bottom(hint.alignment(Alignment::Center)),

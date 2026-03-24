@@ -42,12 +42,14 @@ impl Drop for ShutdownGuard {
             shared.persist_stream_assignments();
             PwCommand::Shutdown {
                 original_default_sink: shared.original_default_sink.clone(),
+                original_default_source: shared.original_default_source.clone(),
                 original_stream_targets: shared.original_stream_targets.clone(),
             }
         } else {
             warn!("shutdown guard: couldn't lock service, sending bare shutdown");
             PwCommand::Shutdown {
                 original_default_sink: None,
+                original_default_source: None,
                 original_stream_targets: HashMap::new(),
             }
         };

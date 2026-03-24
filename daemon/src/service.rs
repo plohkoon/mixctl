@@ -71,6 +71,7 @@ pub struct Shared {
     pub capture_devices: HashMap<u32, CaptureDeviceState>,
     pub playback_devices: HashMap<u32, PlaybackDeviceState>,
     pub original_default_sink: Option<String>,
+    pub original_default_source: Option<String>,
     pub original_stream_targets: HashMap<u32, String>,
     pub input_levels: HashMap<u32, f32>,
     /// Registered components: bus_name → component_type
@@ -154,6 +155,7 @@ impl Service {
                 capture_devices: HashMap::new(),
                 playback_devices: HashMap::new(),
                 original_default_sink: None,
+                original_default_source: None,
                 original_stream_targets: HashMap::new(),
                 input_levels: HashMap::new(),
                 components: HashMap::new(),
@@ -316,6 +318,12 @@ impl Service {
                     shared.original_default_sink = value;
                 }
             }
+            PwEvent::OriginalDefaultSource { value } => {
+                let mut shared = self.inner.lock().await;
+                if shared.original_default_source.is_none() {
+                    shared.original_default_source = value;
+                }
+            }
             PwEvent::OriginalStreamTarget { stream_id, value } => {
                 let mut shared = self.inner.lock().await;
                 shared.original_stream_targets.entry(stream_id).or_insert(value);
@@ -372,12 +380,14 @@ mod tests {
             }],
             outputs: vec![],
             default_input: None,
+            default_output: None,
             app_rules: rules,
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
             applet: Default::default(),
             cli: Default::default(),
+            tui: Default::default(),
         };
         Shared {
             config,
@@ -391,6 +401,7 @@ mod tests {
             capture_devices: HashMap::new(),
             playback_devices: HashMap::new(),
             original_default_sink: None,
+            original_default_source: None,
             original_stream_targets: HashMap::new(),
             input_levels: HashMap::new(),
             components: HashMap::new(),

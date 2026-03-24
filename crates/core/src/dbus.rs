@@ -18,9 +18,11 @@ pub trait MixCtl {
     // Audio status
     fn get_audio_status(&self) -> zbus::Result<String>;
 
-    // Default input
+    // Default input/output
     fn get_default_input(&self) -> zbus::Result<u32>;
     fn set_default_input(&self, id: u32) -> zbus::Result<()>;
+    fn get_default_output(&self) -> zbus::Result<u32>;
+    fn set_default_output(&self, id: u32) -> zbus::Result<()>;
 
     // Inputs (config-only — no volume/mute)
     fn list_inputs(&self) -> zbus::Result<Vec<InputInfo>>;
@@ -69,10 +71,6 @@ pub trait MixCtl {
     // Playback Devices
     fn list_playback_devices(&self) -> zbus::Result<Vec<PlaybackDeviceInfo>>;
 
-    // Page
-    fn get_current_page(&self) -> zbus::Result<u32>;
-    fn set_current_page(&self, page: u32) -> zbus::Result<()>;
-
     // Config sections
     fn get_config_section(&self, section: &str) -> zbus::Result<String>;
     fn set_config_section(&self, section: &str, json: &str) -> zbus::Result<()>;
@@ -117,6 +115,12 @@ pub trait MixCtl {
     fn set_capture_noise_suppression(&self, input_id: u32, enabled: bool) -> zbus::Result<()>;
     fn get_capture_noise_suppression(&self, input_id: u32) -> zbus::Result<bool>;
 
+    // Profiles
+    fn list_profiles(&self) -> zbus::Result<Vec<String>>;
+    fn save_profile(&self, name: &str) -> zbus::Result<()>;
+    fn load_profile(&self, name: &str) -> zbus::Result<()>;
+    fn delete_profile(&self, name: &str) -> zbus::Result<()>;
+
     // Signals
     #[zbus(signal)]
     fn inputs_config_changed(&self) -> zbus::Result<()>;
@@ -129,9 +133,6 @@ pub trait MixCtl {
 
     #[zbus(signal)]
     fn route_changed(&self, input_id: u32, output_id: u32) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn page_changed(&self, page: u32) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn audio_status_changed(&self) -> zbus::Result<()>;
@@ -165,4 +166,7 @@ pub trait MixCtl {
 
     #[zbus(signal)]
     fn output_dsp_changed(&self, output_id: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn profile_changed(&self, name: String) -> zbus::Result<()>;
 }

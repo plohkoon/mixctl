@@ -221,10 +221,7 @@ async fn run_daemon_session(
     spawn_signal!(proxy.receive_route_changed().await?, {
         refresh_and_notify(&s4, &t4, &p4).await;
     });
-    let (s5, t5, p5) = (state.clone(), dev_cmd_tx.clone(), proxy.clone());
-    spawn_signal!(proxy.receive_page_changed().await?, {
-        refresh_and_notify(&s5, &t5, &p5).await;
-    });
+    // Page state is managed locally in beacn-daemon, no D-Bus signal needed
 
     // streams_changed → refresh streams only
     let s_streams = state.clone();
@@ -422,9 +419,6 @@ async fn run_daemon_session(
                 let mut s = state.lock().await;
                 if s.current_page > 0 {
                     s.current_page -= 1;
-                    if let Err(e) = proxy.set_current_page(s.current_page).await {
-                        warn!("set_current_page failed: {e}");
-                    }
                     let snapshot = s.build_snapshot();
                     dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
                 }
@@ -434,9 +428,6 @@ async fn run_daemon_session(
                 let max = s.max_page();
                 if s.current_page < max {
                     s.current_page += 1;
-                    if let Err(e) = proxy.set_current_page(s.current_page).await {
-                        warn!("set_current_page failed: {e}");
-                    }
                     let snapshot = s.build_snapshot();
                     dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
                 }

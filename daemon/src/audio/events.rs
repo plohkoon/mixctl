@@ -64,6 +64,9 @@ pub enum PwEvent {
     OriginalDefaultSink {
         value: Option<String>,
     },
+    OriginalDefaultSource {
+        value: Option<String>,
+    },
     OriginalStreamTarget {
         stream_id: u32,
         value: String,
@@ -153,6 +156,11 @@ impl std::fmt::Debug for PwEvent {
             }
             Self::OriginalDefaultSink { value } => {
                 f.debug_struct("OriginalDefaultSink")
+                    .field("value", value)
+                    .finish()
+            }
+            Self::OriginalDefaultSource { value } => {
+                f.debug_struct("OriginalDefaultSource")
                     .field("value", value)
                     .finish()
             }

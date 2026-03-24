@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+:root {
+  /* Backgrounds — near-black with subtle cool undertone */
+  --bg-base: #0e0e10;
+  --bg-surface-0: #141416;
+  --bg-surface-1: #1a1a1e;
+  --bg-surface-2: #222228;
+  --bg-surface-3: #2a2a32;
+  --bg-overlay: #000000b3;
+
+  /* Text hierarchy */
+  --text-primary: #ebebf0;
+  --text-secondary: #a0a0b0;
+  --text-muted: #606070;
+  --text-disabled: #404048;
+  --text-inverse: #0e0e10;
+
+  /* Accents — desaturated for dark backgrounds */
+  --accent-primary: #6c8cff;
+  --accent-primary-hover: #8aa4ff;
+  --accent-primary-muted: #6c8cff1a;
+  --accent-success: #4ade80;
+  --accent-danger: #f87171;
+  --accent-danger-hover: #fca5a5;
+  --accent-warning: #fbbf24;
+  --accent-warning-muted: #fbbf241a;
+  --accent-info: #22d3ee;
+
+  /* Borders */
+  --border-subtle: #ffffff0a;
+  --border-default: #ffffff14;
+  --border-strong: #ffffff24;
+  --border-focus: #6c8cff80;
+
+  /* Channel colors */
+  --channel-1: #6c8cff;
+  --channel-2: #f87171;
+  --channel-3: #4ade80;
+  --channel-4: #fbbf24;
+  --channel-5: #c084fc;
+  --channel-6: #22d3ee;
+  --channel-7: #fb923c;
+  --channel-8: #f472b6;
+  --channel-9: #a3e635;
+  --channel-10: #e2e8f0;
+
+  /* Typography */
+  --font-ui: 'Inter', 'Inter Variable', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* All custom base styles go inside @layer base so Tailwind utilities can
+   override them. Unlayered styles beat ALL @layer rules in CSS cascade. */
+@layer base {
+  body {
+    font-family: var(--font-ui);
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font-size: 13px;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--bg-surface-3);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+  }
+
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid var(--border-focus);
+    outline-offset: 2px;
+  }
+
+  /* Dark-mode dropdowns — WebKitGTK renders native <select> with OS theme */
+  select {
+    background-color: var(--bg-surface-2);
+    color: var(--text-primary);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    padding: 4px 8px;
+  }
+  select option {
+    background-color: var(--bg-surface-2);
+    color: var(--text-primary);
+  }
+  select:hover {
+    border-color: var(--border-strong);
+  }
+
+  /* Dark-mode inputs and checkboxes */
+  input[type="checkbox"] {
+    accent-color: var(--accent-primary);
+  }
+  input[type="number"],
+  input[type="text"] {
+    background-color: var(--bg-surface-2);
+    color: var(--text-primary);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    padding: 4px 8px;
+  }
+
+  /* Force dark color scheme for native widgets */
+  html {
+    color-scheme: dark;
+  }
+}

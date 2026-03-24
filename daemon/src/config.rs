@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use mixctl_core::config_sections::{AppletConfig, BeacnConfig, CliConfig, UiConfig};
+use mixctl_core::config_sections::{AppletConfig, BeacnConfig, CliConfig, TuiConfig, UiConfig};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -18,6 +18,8 @@ pub struct ConfigFile {
     pub outputs: Vec<ChannelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_input: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_output: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,6 +32,8 @@ pub struct ConfigFile {
     pub applet: AppletConfig,
     #[serde(default, skip_serializing_if = "is_default")]
     pub cli: CliConfig,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub tui: TuiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,12 +79,14 @@ impl Default for ConfigFile {
                 ChannelConfig { id: Some(8), name: "VOD Track".into(), color: "#1ABC9C".into(), target_device: None, capture_device: None },
             ],
             default_input: Some(1),
+            default_output: Some(6),
             app_rules: Vec::new(),
             broadcast_levels: None,
             beacn: BeacnConfig::default(),
             ui: UiConfig::default(),
             applet: AppletConfig::default(),
             cli: CliConfig::default(),
+            tui: TuiConfig::default(),
         }
     }
 }
@@ -183,10 +189,6 @@ impl ConfigFile {
         next_unused_id(&used)
     }
 
-    pub fn max_page(&self) -> u32 {
-        let n = self.inputs.len() as u32;
-        if n == 0 { 0 } else { (n - 1) / 4 }
-    }
 }
 
 /// Find the smallest positive integer not in `used`.
@@ -218,12 +220,14 @@ mod tests {
             ],
             outputs: vec![],
             default_input: None,
+            default_output: None,
             app_rules: Vec::new(),
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
             applet: Default::default(),
             cli: Default::default(),
+            tui: Default::default(),
         };
         config.fixup_ids();
 
@@ -246,12 +250,14 @@ mod tests {
                 make_channel(Some(0), "C"),
             ],
             default_input: None,
+            default_output: None,
             app_rules: Vec::new(),
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
             applet: Default::default(),
             cli: Default::default(),
+            tui: Default::default(),
         };
         config.fixup_ids();
 
@@ -272,12 +278,14 @@ mod tests {
                 make_channel(Some(10), "C"),
             ],
             default_input: None,
+            default_output: None,
             app_rules: Vec::new(),
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
             applet: Default::default(),
             cli: Default::default(),
+            tui: Default::default(),
         };
         config.fixup_ids();
 
@@ -296,12 +304,14 @@ mod tests {
             ],
             outputs: vec![],
             default_input: None,
+            default_output: None,
             app_rules: Vec::new(),
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
             applet: Default::default(),
             cli: Default::default(),
+            tui: Default::default(),
         };
         config.fixup_ids();
 
@@ -339,12 +349,14 @@ mod tests {
                 make_channel(Some(3), "C"),
             ],
             default_input: None,
+            default_output: None,
             app_rules: Vec::new(),
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
             applet: Default::default(),
             cli: Default::default(),
+            tui: Default::default(),
         };
         assert_eq!(config.next_unused_id(), 4);
     }

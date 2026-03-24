@@ -3,10 +3,37 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{AppAction, AppState, Panel};
 
 pub fn handle_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
+    // Rename mode intercepts all keys
+    if state.rename_buf.is_some() {
+        return match key.code {
+            KeyCode::Enter => Some(AppAction::ConfirmRename),
+            KeyCode::Esc => Some(AppAction::CancelRename),
+            KeyCode::Backspace => Some(AppAction::RenameBackspace),
+            KeyCode::Char(c) => Some(AppAction::RenameChar(c)),
+            _ => None,
+        };
+    }
+
     // Help overlay captures all keys except ? and q
     if state.show_help {
         return match key.code {
             KeyCode::Char('?') | KeyCode::Esc => Some(AppAction::ShowHelp),
+            KeyCode::Char('q') => Some(AppAction::Quit),
+            _ => None,
+        };
+    }
+
+    // DSP editing mode intercepts all keys when active
+    if state.dsp_editing && state.active_panel == Panel::Dsp {
+        return match key.code {
+            KeyCode::Esc => Some(AppAction::ExitDspEdit),
+            KeyCode::Char('j') | KeyCode::Down => Some(AppAction::DspParamNext),
+            KeyCode::Char('k') | KeyCode::Up => Some(AppAction::DspParamPrev),
+            KeyCode::Char('l') | KeyCode::Right => Some(AppAction::DspValueUp { fine: false }),
+            KeyCode::Char('h') | KeyCode::Left => Some(AppAction::DspValueDown { fine: false }),
+            KeyCode::Char('L') => Some(AppAction::DspValueUp { fine: true }),
+            KeyCode::Char('H') => Some(AppAction::DspValueDown { fine: true }),
+            KeyCode::Char('R') => Some(AppAction::DspResetEq),
             KeyCode::Char('q') => Some(AppAction::Quit),
             _ => None,
         };
@@ -24,6 +51,13 @@ pub fn handle_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
             _ => {}
         },
         Panel::Capture => match key.code {
+            KeyCode::Char('a') => return Some(AppAction::AddCaptureInput),
+            KeyCode::Char('x') | KeyCode::Delete => return Some(AppAction::RemoveCaptureInput),
+            KeyCode::Char('l') | KeyCode::Right => return Some(AppAction::SetCaptureVolume { fine: false }),
+            KeyCode::Char('h') | KeyCode::Left => return Some(AppAction::DecreaseCaptureVolume { fine: false }),
+            KeyCode::Char('L') => return Some(AppAction::SetCaptureVolume { fine: true }),
+            KeyCode::Char('H') => return Some(AppAction::DecreaseCaptureVolume { fine: true }),
+            KeyCode::Char('m') => return Some(AppAction::SetCaptureMute),
             KeyCode::Char('u') => return Some(AppAction::UnbindCapture),
             KeyCode::Char(c @ '1'..='9') => {
                 let n = (c as usize) - ('0' as usize);
@@ -39,6 +73,12 @@ pub fn handle_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
                     return Some(AppAction::CycleOutputColor);
                 }
             }
+            KeyCode::Char('t') => return Some(AppAction::SetOutputTarget),
+            KeyCode::Char('r') => return Some(AppAction::StartRename),
+            KeyCode::Char('J') => return Some(AppAction::MoveDown),
+            KeyCode::Char('K') => return Some(AppAction::MoveUp),
+            KeyCode::Char('a') => return Some(AppAction::AddChannel),
+            KeyCode::Char('x') | KeyCode::Delete => return Some(AppAction::RemoveChannel),
             _ => {}
         },
         Panel::Dsp => match key.code {
@@ -47,6 +87,8 @@ pub fn handle_key(key: KeyEvent, state: &AppState) -> Option<AppAction> {
             KeyCode::Char('d') => return Some(AppAction::ToggleDeesser),
             KeyCode::Char('c') => return Some(AppAction::ToggleCompressor),
             KeyCode::Char('l') => return Some(AppAction::ToggleLimiter),
+            KeyCode::Char('R') => return Some(AppAction::DspResetEq),
+            KeyCode::Enter => return Some(AppAction::EnterDspEdit),
             _ => {}
         },
         _ => {}
@@ -112,6 +154,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use mixctl_core::{InputInfo, OutputInfo, RouteInfo};
+    use mixctl_core::config_sections::TuiConfig;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -131,7 +174,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             None,
+            TuiConfig::default(),
         );
         state.active_panel = panel;
         state

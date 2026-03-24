@@ -104,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     let default_input_id = config.default_input;
+    let default_output_id = config.default_output;
 
     let broadcast_levels = config.broadcast_levels.unwrap_or(false);
     let pw_config = PwEngineConfig {
@@ -113,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         output_targets,
         capture_inputs,
         default_input_id,
+        default_output_id,
         broadcast_levels,
     };
 

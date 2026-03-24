@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures_lite::StreamExt;
-use mixctl_core::config_sections::BeacnConfig;
+use mixctl_core::config_sections::{BeacnConfig, TuiConfig};
 use mixctl_core::dbus::MixCtlProxy;
 use tokio::sync::mpsc;
 use zbus::Connection;
@@ -19,6 +19,7 @@ pub async fn connect_and_load() -> Result<(MixCtlProxy<'static>, AppState)> {
     let streams = proxy.list_streams().await?;
     let rules = proxy.list_app_rules().await.unwrap_or_default();
     let capture_devices = proxy.list_capture_devices().await.unwrap_or_default();
+    let playback_devices = proxy.list_playback_devices().await.unwrap_or_default();
     let components = proxy.list_components().await.unwrap_or_default();
 
     let routes = if let Some(first_output) = outputs.first() {
@@ -32,7 +33,12 @@ pub async fn connect_and_load() -> Result<(MixCtlProxy<'static>, AppState)> {
         Err(_) => None,
     };
 
-    let mut state = AppState::new(inputs, outputs, routes, streams, rules, capture_devices, components, beacn_config);
+    let tui_config = match proxy.get_config_section("tui").await {
+        Ok(json) => serde_json::from_str::<TuiConfig>(&json).unwrap_or_default(),
+        Err(_) => TuiConfig::default(),
+    };
+
+    let mut state = AppState::new(inputs, outputs, routes, streams, rules, capture_devices, playback_devices, components, beacn_config, tui_config);
 
     // Load initial DSP state for all inputs
     for input in &state.inputs {
@@ -147,6 +153,18 @@ pub async fn subscribe_signals(
         while stream.next().await.is_some() {
             if let Ok(devices) = p.list_capture_devices().await {
                 t.send(DaemonSignal::CaptureDevicesRefreshed(devices)).ok();
+            }
+        }
+    });
+
+    // playback_devices_changed → re-fetch playback devices
+    let p = proxy.clone();
+    let t = tx.clone();
+    let mut stream = proxy.receive_playback_devices_changed().await?;
+    tokio::spawn(async move {
+        while stream.next().await.is_some() {
+            if let Ok(devices) = p.list_playback_devices().await {
+                t.send(DaemonSignal::PlaybackDevicesRefreshed(devices)).ok();
             }
         }
     });

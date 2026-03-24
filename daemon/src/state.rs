@@ -33,7 +33,6 @@ pub struct PlaybackDeviceState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateFile {
     pub version: u32,
-    pub current_page: u32,
     pub outputs: HashMap<String, OutputState>,
     pub routes: HashMap<String, RouteState>,
     #[serde(default)]
@@ -225,7 +224,6 @@ impl Default for StateFile {
     fn default() -> Self {
         Self {
             version: 1,
-            current_page: 0,
             outputs: HashMap::new(),
             routes: HashMap::new(),
             capture_volumes: HashMap::new(),
@@ -360,13 +358,6 @@ impl StateFile {
             }
             keep
         });
-
-        // Clamp page
-        let max = config.max_page();
-        if self.current_page > max {
-            self.current_page = max;
-            changed = true;
-        }
 
         changed
     }
@@ -560,12 +551,14 @@ mod tests {
             inputs,
             outputs,
             default_input: None,
+            default_output: None,
             app_rules: Vec::new(),
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
             applet: Default::default(),
             cli: Default::default(),
+            tui: Default::default(),
         }
     }
 
@@ -638,21 +631,6 @@ mod tests {
 
         assert!(state.outputs.contains_key("5"));
         assert!(!state.outputs.contains_key("99"));
-    }
-
-    #[test]
-    fn reconcile_clamps_page_when_inputs_reduced() {
-        let config = make_config(
-            vec![make_channel(1, "Sys")], // 1 input -> max_page = 0
-            vec![make_channel(5, "Mix1")],
-        );
-        let mut state = StateFile::default();
-        state.current_page = 3; // was valid before inputs were removed
-
-        let changed = state.reconcile(&config);
-
-        assert!(changed);
-        assert_eq!(state.current_page, 0);
     }
 
     #[test]

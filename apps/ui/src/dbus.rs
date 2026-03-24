@@ -7,9 +7,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::{
-    AppRuleData, BeacnDialog, CaptureDeviceData, CaptureDialog, CompressorData, DeesserData,
-    DspDialog, EqBandData, GateData, LimiterData, MainWindow, MixerState, RouteData, RulesDialog,
-    SidebarOutput, StreamData, UserAction,
+    AppRuleData, BeacnDialog, CaptureDeviceData, CaptureDialog, ChannelItemData, ChannelsDialog,
+    CompressorData, DeesserData, DspDialog, EqBandData, GateData, LimiterData, MainWindow,
+    MixerState, RouteData, RulesDialog, SidebarOutput, StreamData, UserAction,
 };
 
 pub(crate) async fn run_background(
@@ -186,6 +186,9 @@ async fn try_connect_and_run(
                             UserAction::OpenDspDialog => {
                                 open_dsp_dialog(&proxy).await;
                             }
+                            UserAction::OpenChannelsDialog => {
+                                open_channels_dialog(&proxy).await;
+                            }
                         }
                     }
                     None => {
@@ -358,6 +361,182 @@ async fn open_capture_dialog(proxy: &MixCtlProxy<'static>) {
         });
 
         dialog.show().unwrap();
+    }).ok();
+}
+
+async fn open_channels_dialog(proxy: &MixCtlProxy<'static>) {
+    let inputs = proxy.list_inputs().await.unwrap_or_default();
+    let outputs = proxy.list_outputs().await.unwrap_or_default();
+
+    let input_data: Vec<ChannelItemData> = inputs.iter().map(|i| ChannelItemData {
+        id: i.id as i32,
+        name: SharedString::from(i.name.as_str()),
+        color: SharedString::from(i.color.as_str()),
+    }).collect();
+    let output_data: Vec<ChannelItemData> = outputs.iter().map(|o| ChannelItemData {
+        id: o.id as i32,
+        name: SharedString::from(o.name.as_str()),
+        color: SharedString::from(o.color.as_str()),
+    }).collect();
+
+    let p = proxy.clone();
+    slint::invoke_from_event_loop(move || {
+        let dialog = ChannelsDialog::new().unwrap();
+        dialog.set_inputs(ModelRc::new(VecModel::from(input_data)));
+        dialog.set_outputs(ModelRc::new(VecModel::from(output_data)));
+
+        // --- Add input ---
+        let p2 = p.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_add_input(move |name, color| {
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            let name = name.to_string();
+            let color = color.to_string();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.add_input(&name, &color).await.ok();
+                    refresh_channels_dialog(&p3, &d).await;
+                });
+            });
+        });
+
+        // --- Remove input ---
+        let p2 = p.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_remove_input(move |id| {
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.remove_input(id as u32).await.ok();
+                    refresh_channels_dialog(&p3, &d).await;
+                });
+            });
+        });
+
+        // --- Move input ---
+        let p2 = p.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_move_input(move |id, position| {
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.move_input(id as u32, position as u32).await.ok();
+                    refresh_channels_dialog(&p3, &d).await;
+                });
+            });
+        });
+
+        // --- Rename input ---
+        let p2 = p.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_rename_input(move |id, new_name| {
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            let name = new_name.to_string();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_input_name(id as u32, &name).await.ok();
+                    refresh_channels_dialog(&p3, &d).await;
+                });
+            });
+        });
+
+        // --- Add output ---
+        let p2 = p.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_add_output(move |name, color, source_output_id| {
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            let name = name.to_string();
+            let color = color.to_string();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.add_output(&name, &color, source_output_id as u32).await.ok();
+                    refresh_channels_dialog(&p3, &d).await;
+                });
+            });
+        });
+
+        // --- Remove output ---
+        let p2 = p.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_remove_output(move |id| {
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.remove_output(id as u32).await.ok();
+                    refresh_channels_dialog(&p3, &d).await;
+                });
+            });
+        });
+
+        // --- Move output ---
+        let p2 = p.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_move_output(move |id, position| {
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.move_output(id as u32, position as u32).await.ok();
+                    refresh_channels_dialog(&p3, &d).await;
+                });
+            });
+        });
+
+        // --- Rename output ---
+        let p2 = p.clone();
+        let d_weak = dialog.as_weak();
+        dialog.on_rename_output(move |id, new_name| {
+            let p3 = p2.clone();
+            let d = d_weak.clone();
+            let name = new_name.to_string();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    p3.set_output_name(id as u32, &name).await.ok();
+                    refresh_channels_dialog(&p3, &d).await;
+                });
+            });
+        });
+
+        dialog.show().unwrap();
+    }).ok();
+}
+
+async fn refresh_channels_dialog(
+    proxy: &MixCtlProxy<'static>,
+    d_weak: &slint::Weak<ChannelsDialog>,
+) {
+    let inputs = proxy.list_inputs().await.unwrap_or_default();
+    let outputs = proxy.list_outputs().await.unwrap_or_default();
+    let input_data: Vec<ChannelItemData> = inputs.iter().map(|i| ChannelItemData {
+        id: i.id as i32,
+        name: SharedString::from(i.name.as_str()),
+        color: SharedString::from(i.color.as_str()),
+    }).collect();
+    let output_data: Vec<ChannelItemData> = outputs.iter().map(|o| ChannelItemData {
+        id: o.id as i32,
+        name: SharedString::from(o.name.as_str()),
+        color: SharedString::from(o.color.as_str()),
+    }).collect();
+    let d = d_weak.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(dlg) = d.upgrade() {
+            dlg.set_inputs(ModelRc::new(VecModel::from(input_data)));
+            dlg.set_outputs(ModelRc::new(VecModel::from(output_data)));
+        }
     }).ok();
 }
 

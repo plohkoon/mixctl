@@ -6,8 +6,9 @@ import { RulesDialog, AppRuleData } from "rules_dialog.slint";
 import { CaptureDialog, CaptureDeviceData } from "capture_dialog.slint";
 import { BeacnDialog } from "beacn_dialog.slint";
 import { DspDialog, EqBandData, GateData, DeesserData, CompressorData, LimiterData } from "dsp_dialog.slint";
+import { ChannelsDialog, ChannelItemData } from "channels_dialog.slint";
 
-export { SidebarOutput, StreamData, RulesDialog, AppRuleData, CaptureDialog, CaptureDeviceData, BeacnDialog, DspDialog, EqBandData, GateData, DeesserData, CompressorData, LimiterData }
+export { SidebarOutput, StreamData, RulesDialog, AppRuleData, CaptureDialog, CaptureDeviceData, BeacnDialog, DspDialog, EqBandData, GateData, DeesserData, CompressorData, LimiterData, ChannelsDialog, ChannelItemData }
 
 export struct RouteData {
     input-id: int,
@@ -41,6 +42,7 @@ export global MixerState {
     callback open-capture-dialog();
     callback open-beacn-dialog();
     callback open-dsp-dialog();
+    callback open-channels-dialog();
 }
 
 export component MainWindow inherits Window {
@@ -74,6 +76,11 @@ export component MainWindow inherits Window {
                 }
 
                 Rectangle { horizontal-stretch: 1; }
+
+                Button {
+                    text: "Channels";
+                    clicked => { MixerState.open-channels-dialog(); }
+                }
 
                 Button {
                     text: "Rules";

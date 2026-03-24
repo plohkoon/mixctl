@@ -5,7 +5,7 @@ use mixctl_core::{
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
 
-use mixctl_core::config_sections::{AppletConfig, BeacnConfig, CliConfig, UiConfig};
+use mixctl_core::config_sections::{AppletConfig, BeacnConfig, CliConfig, TuiConfig, UiConfig};
 
 use tracing::{info, warn};
 
@@ -55,6 +55,30 @@ impl Service {
         Service::send_pw_cmd(&shared, PwCommand::SetDefaultInput { input_id: id });
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
+        Ok(())
+    }
+
+    async fn get_default_output(&self) -> zbus::fdo::Result<u32> {
+        let shared = self.inner.lock().await;
+        Ok(shared.config.default_output.unwrap_or(0))
+    }
+
+    async fn set_default_output(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        if id > 0 {
+            if !shared.config.outputs.iter().any(|o| o.id() == id) {
+                return Err(zbus::fdo::Error::Failed(format!("output id {} not found", id)));
+            }
+        }
+        shared.config.default_output = if id == 0 { None } else { Some(id) };
+        shared.config_dirty = true;
+        Service::send_pw_cmd(&shared, PwCommand::SetDefaultOutput { output_id: id });
+        drop(shared);
+        Self::outputs_config_changed(&emitter).await.ok();
         Ok(())
     }
 
@@ -154,10 +178,6 @@ impl Service {
 
         shared.config.inputs.remove(idx);
         shared.state.remove_routes_for_input(id);
-        let max = shared.config.max_page();
-        if shared.state.current_page > max {
-            shared.state.current_page = max;
-        }
         shared.config_dirty = true;
         shared.state_dirty = true;
 
@@ -941,6 +961,7 @@ impl Service {
         );
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
+        Self::capture_devices_changed(&emitter).await.ok();
         Ok(())
     }
 
@@ -951,16 +972,34 @@ impl Service {
         device_name: &str,
     ) -> zbus::fdo::Result<()> {
         let mut shared = self.inner.lock().await;
-        {
-            let cfg = shared
-                .config
-                .find_input(input_id)
-                .ok_or_else(|| zbus::fdo::Error::Failed(format!("input id {} not found", input_id)))?;
-            if cfg.capture_device.is_some() {
-                return Err(zbus::fdo::Error::Failed(
-                    "input already has a capture device bound".into(),
-                ));
-            }
+        // Verify target input exists
+        if shared.config.find_input(input_id).is_none() {
+            return Err(zbus::fdo::Error::Failed(format!("input id {} not found", input_id)));
+        }
+        // Unbind this capture device from ANY input that currently has it
+        let old_input_id = shared.config.inputs.iter()
+            .find(|i| i.capture_device.as_deref() == Some(device_name))
+            .map(|i| i.id());
+        if let Some(old_id) = old_input_id {
+            let cfg_mut = shared.config.find_input_mut(old_id).unwrap();
+            cfg_mut.capture_device = None;
+            Service::send_pw_cmd(
+                &shared,
+                PwCommand::DestroyCaptureLoopback { input_id: old_id },
+            );
+            tracing::info!("unbound capture device '{device_name}' from input {old_id}");
+        }
+        // Also unbind any existing capture device from the target input
+        let target_has_capture = shared.config.find_input(input_id)
+            .and_then(|c| c.capture_device.clone());
+        if let Some(old_device) = target_has_capture {
+            let cfg_mut = shared.config.find_input_mut(input_id).unwrap();
+            cfg_mut.capture_device = None;
+            Service::send_pw_cmd(
+                &shared,
+                PwCommand::DestroyCaptureLoopback { input_id },
+            );
+            tracing::info!("unbound previous capture device '{old_device}' from target input {input_id}");
         }
         // Feedback loop detection: check if any output targeted at the same
         // hardware device as this capture would create a mic→speaker→mic loop.
@@ -1005,6 +1044,7 @@ impl Service {
 
         drop(shared);
         Self::inputs_config_changed(&emitter).await.ok();
+        Self::capture_devices_changed(&emitter).await.ok();
         Ok(())
     }
 
@@ -1087,33 +1127,7 @@ impl Service {
         Ok(())
     }
 
-    // -- Page --
 
-    async fn get_current_page(&self) -> zbus::fdo::Result<u32> {
-        let shared = self.inner.lock().await;
-        Ok(shared.state.current_page)
-    }
-
-    async fn set_current_page(
-        &self,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-        page: u32,
-    ) -> zbus::fdo::Result<()> {
-        let mut shared = self.inner.lock().await;
-        let max = shared.config.max_page();
-        if page > max {
-            return Err(zbus::fdo::Error::InvalidArgs(format!(
-                "page {} out of range (max {})",
-                page, max
-            )));
-        }
-        shared.state.current_page = page;
-        shared.state_dirty = true;
-
-        drop(shared);
-        Self::page_changed(&emitter, page).await.ok();
-        Ok(())
-    }
 
     // -- Config sections --
 
@@ -1124,6 +1138,7 @@ impl Service {
             "ui" => serde_json::to_string(&shared.config.ui),
             "applet" => serde_json::to_string(&shared.config.applet),
             "cli" => serde_json::to_string(&shared.config.cli),
+            "tui" => serde_json::to_string(&shared.config.tui),
             _ => {
                 return Err(zbus::fdo::Error::InvalidArgs(format!(
                     "unknown config section '{section}'"
@@ -1156,6 +1171,10 @@ impl Service {
             }
             "cli" => {
                 shared.config.cli = serde_json::from_str::<CliConfig>(json)
+                    .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
+            }
+            "tui" => {
+                shared.config.tui = serde_json::from_str::<TuiConfig>(json)
                     .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
             }
             _ => {
@@ -1645,6 +1664,81 @@ impl Service {
         Ok(false)
     }
 
+    // -- Profiles --
+
+    async fn list_profiles(&self) -> zbus::fdo::Result<Vec<String>> {
+        let profile_dir = profile_dir();
+        let mut names = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&profile_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.path().file_stem() {
+                    if entry.path().extension().map(|e| e == "toml").unwrap_or(false) {
+                        names.push(name.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    async fn save_profile(&self, name: &str) -> zbus::fdo::Result<()> {
+        let shared = self.inner.lock().await;
+        let profile_dir = profile_dir();
+        std::fs::create_dir_all(&profile_dir)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("create dir failed: {e}")))?;
+        let path = profile_dir.join(format!("{name}.toml"));
+        let toml = toml::to_string_pretty(&shared.state)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("serialize failed: {e}")))?;
+        std::fs::write(&path, toml)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("write failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn load_profile(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        name: &str,
+    ) -> zbus::fdo::Result<()> {
+        let profile_dir = profile_dir();
+        let path = profile_dir.join(format!("{name}.toml"));
+        let toml_str = std::fs::read_to_string(&path)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("read failed: {e}")))?;
+        let loaded_state: crate::state::StateFile = toml::from_str(&toml_str)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("parse failed: {e}")))?;
+
+        let mut shared = self.inner.lock().await;
+        // Merge loaded state: overwrite volumes, mutes, DSP but keep structural state
+        shared.state.outputs = loaded_state.outputs;
+        shared.state.routes = loaded_state.routes;
+        shared.state.capture_volumes = loaded_state.capture_volumes;
+        shared.state.input_eq = loaded_state.input_eq;
+        shared.state.input_gate = loaded_state.input_gate;
+        shared.state.input_deesser = loaded_state.input_deesser;
+        shared.state.output_compressor = loaded_state.output_compressor;
+        shared.state.output_limiter = loaded_state.output_limiter;
+
+        // Reconcile to ensure state matches current config
+        let config = shared.config.clone();
+        shared.state.reconcile(&config);
+        shared.state_dirty = true;
+
+        drop(shared);
+        Self::profile_changed(&emitter, name.to_string()).await.ok();
+        // Also emit full refresh signals so all apps update
+        Self::inputs_config_changed(&emitter).await.ok();
+        Self::outputs_config_changed(&emitter).await.ok();
+        Ok(())
+    }
+
+    async fn delete_profile(&self, name: &str) -> zbus::fdo::Result<()> {
+        let profile_dir = profile_dir();
+        let path = profile_dir.join(format!("{name}.toml"));
+        std::fs::remove_file(&path)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("delete failed: {e}")))?;
+        Ok(())
+    }
+
     // -- Signals --
 
     #[zbus(signal)]
@@ -1707,6 +1801,16 @@ impl Service {
 
     #[zbus(signal)]
     async fn output_dsp_changed(emitter: &SignalEmitter<'_>, output_id: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn profile_changed(emitter: &SignalEmitter<'_>, name: String) -> zbus::Result<()>;
+}
+
+fn profile_dir() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("mixctl")
+        .join("profiles")
 }
 
 // Public wrappers for signal emission from outside the #[interface] block.
@@ -1766,5 +1870,13 @@ impl Service {
         output_id: u32,
     ) -> zbus::Result<()> {
         Self::output_dsp_changed(emitter, output_id).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn emit_profile_changed(
+        emitter: &SignalEmitter<'_>,
+        name: String,
+    ) -> zbus::Result<()> {
+        Self::profile_changed(emitter, name).await
     }
 }

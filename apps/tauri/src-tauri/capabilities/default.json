@@ -1,0 +1,17 @@
+{
+  "identifier": "default",
+  "description": "Capability for the main window and applet",
+  "windows": ["main", "applet", "dsp-dialog", "beacn-dialog", "channel-editor-*"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-create",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:webview:default",
+    "positioner:default",
+    "window-state:default"
+  ]
+}

@@ -66,15 +66,13 @@ impl BeacnState {
 
     /// Refresh all state from the mixer daemon via D-Bus.
     pub async fn refresh_from_dbus(&mut self, proxy: &MixCtlProxy<'_>) -> anyhow::Result<()> {
-        // Fetch inputs, outputs, and page concurrently to reduce round-trips
-        let (inputs_res, outputs_res, page_res) = tokio::join!(
+        // Fetch inputs and outputs concurrently to reduce round-trips
+        let (inputs_res, outputs_res) = tokio::join!(
             proxy.list_inputs(),
             proxy.list_outputs(),
-            proxy.get_current_page(),
         );
         let inputs = inputs_res?;
         let outputs = outputs_res?;
-        let page = page_res?;
 
         self.inputs = inputs
             .iter()
@@ -99,7 +97,8 @@ impl BeacnState {
             self.current_output_index = 0;
         }
 
-        self.current_page = page;
+        // Page state is managed locally (not fetched from daemon)
+        // self.current_page stays at its current value (initialized to 0 on boot)
 
         // Fetch routes for all outputs
         self.routes.clear();

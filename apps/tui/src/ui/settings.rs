@@ -32,12 +32,28 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let color = parse_color(&input.color);
         let block_str = "\u{2588}\u{2588}\u{2588}\u{2588}";
 
+        let name_display = if is_selected {
+            if let Some(ref buf) = state.rename_buf {
+                format!("{}\u{2588}", buf)
+            } else {
+                format!("{:<10}", input.name)
+            }
+        } else {
+            format!("{:<10}", input.name)
+        };
+
+        let name_style = if is_selected && state.rename_buf.is_some() {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::UNDERLINED)
+        } else if is_selected {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
         let line = Line::from(vec![
             Span::raw(cursor),
-            Span::styled(
-                format!("{:<10}", input.name),
-                Style::default().fg(if is_selected { Color::White } else { Color::Gray }),
-            ),
+            Span::styled(name_display, name_style),
+            Span::raw(" "),
             Span::styled(
                 format!("{:<10}", input.color),
                 Style::default().fg(Color::DarkGray),
@@ -63,17 +79,44 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let color = parse_color(&output.color);
         let block_str = "\u{2588}\u{2588}\u{2588}\u{2588}";
 
+        let name_display = if is_selected {
+            if let Some(ref buf) = state.rename_buf {
+                format!("{}\u{2588}", buf)
+            } else {
+                format!("{:<10}", output.name)
+            }
+        } else {
+            format!("{:<10}", output.name)
+        };
+
+        let name_style = if is_selected && state.rename_buf.is_some() {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::UNDERLINED)
+        } else if is_selected {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        let target_display = if output.target_device.is_empty() {
+            "(default)".to_string()
+        } else {
+            output.target_device.clone()
+        };
+
         let line = Line::from(vec![
             Span::raw(cursor),
-            Span::styled(
-                format!("{:<10}", output.name),
-                Style::default().fg(if is_selected { Color::White } else { Color::Gray }),
-            ),
+            Span::styled(name_display, name_style),
+            Span::raw(" "),
             Span::styled(
                 format!("{:<10}", output.color),
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(block_str, Style::default().fg(color)),
+            Span::raw(" "),
+            Span::styled(
+                format!("\u{2192} {}", target_display),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
 
         items.push(ListItem::new(line));
@@ -117,10 +160,29 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         ])));
     }
 
-    let hint = Line::from(vec![
-        Span::styled("c", Style::default().fg(Color::Yellow)),
-        Span::raw(": cycle colour"),
-    ]);
+    let hint = if state.rename_buf.is_some() {
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(": confirm  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(": cancel"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("r", Style::default().fg(Color::Yellow)),
+            Span::raw(": rename  "),
+            Span::styled("c", Style::default().fg(Color::Yellow)),
+            Span::raw(": colour  "),
+            Span::styled("t", Style::default().fg(Color::Yellow)),
+            Span::raw(": target device  "),
+            Span::styled("a", Style::default().fg(Color::Yellow)),
+            Span::raw(": add  "),
+            Span::styled("x", Style::default().fg(Color::Yellow)),
+            Span::raw(": remove  "),
+            Span::styled("J/K", Style::default().fg(Color::Yellow)),
+            Span::raw(": reorder"),
+        ])
+    };
 
     let list = List::new(items).block(
         block.title_bottom(hint.alignment(Alignment::Center)),

@@ -36,11 +36,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RouteCmd,
     },
-    /// Page management
-    Page {
-        #[command(subcommand)]
-        cmd: PageCmd,
-    },
     /// Listen for daemon signals (runs until interrupted)
     Listen {
         #[command(subcommand)]
@@ -366,16 +361,6 @@ enum ListenCmd {
     State,
     /// Listen for config changes (inputs + outputs)
     Config,
-    /// Listen for page changes
-    Page,
-}
-
-#[derive(Subcommand)]
-enum PageCmd {
-    /// Get the current page
-    Get,
-    /// Set the current page
-    Set { page: u32 },
 }
 
 #[tokio::main]
@@ -895,7 +880,6 @@ async fn main() -> Result<()> {
                     let mut route_stream = proxy.receive_route_changed().await?;
                     let mut inputs_config_stream = proxy.receive_inputs_config_changed().await?;
                     let mut outputs_config_stream = proxy.receive_outputs_config_changed().await?;
-                    let mut page_stream = proxy.receive_page_changed().await?;
                     let mut streams_stream = proxy.receive_streams_changed().await?;
                     let mut rules_stream = proxy.receive_app_rules_changed().await?;
                     let mut capture_stream = proxy.receive_capture_devices_changed().await?;
@@ -932,19 +916,11 @@ async fn main() -> Result<()> {
                                     ),
                                 ),
                                 futures_lite::future::or(
-                                    futures_lite::future::or(
-                                        async {
-                                            if let Some(signal) = page_stream.next().await {
-                                                let args = signal.args().unwrap();
-                                                println!("page_changed: {}", args.page);
-                                            }
-                                        },
-                                        async {
-                                            if let Some(_) = streams_stream.next().await {
-                                                println!("streams_changed");
-                                            }
-                                        },
-                                    ),
+                                    async {
+                                        if let Some(_) = streams_stream.next().await {
+                                            println!("streams_changed");
+                                        }
+                                    },
                                     futures_lite::future::or(
                                         async {
                                             if let Some(_) = rules_stream.next().await {
@@ -1011,25 +987,8 @@ async fn main() -> Result<()> {
                         .await;
                     }
                 }
-                ListenCmd::Page => {
-                    let mut stream = proxy.receive_page_changed().await?;
-                    while let Some(signal) = stream.next().await {
-                        let args = signal.args().unwrap();
-                        println!("page_changed: {}", args.page);
-                    }
-                }
             }
         }
-        Cmd::Page { cmd } => match cmd {
-            PageCmd::Get => {
-                let page = proxy.get_current_page().await?;
-                println!("{page}");
-            }
-            PageCmd::Set { page } => {
-                proxy.set_current_page(page).await?;
-                println!("ok");
-            }
-        },
     }
 
     Ok(())

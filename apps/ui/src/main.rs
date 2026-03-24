@@ -25,6 +25,7 @@ pub(crate) enum UserAction {
     OpenCaptureDialog,
     OpenBeacnDialog,
     OpenDspDialog,
+    OpenChannelsDialog,
 }
 
 fn main() {
@@ -119,5 +120,10 @@ fn wire_callbacks(window: &MainWindow, action_tx: &Arc<mpsc::UnboundedSender<Use
     let tx = action_tx.clone();
     mixer.on_open_dsp_dialog(move || {
         tx.send(UserAction::OpenDspDialog).ok();
+    });
+
+    let tx = action_tx.clone();
+    mixer.on_open_channels_dialog(move || {
+        tx.send(UserAction::OpenChannelsDialog).ok();
     });
 }
