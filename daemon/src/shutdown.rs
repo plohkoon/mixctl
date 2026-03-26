@@ -37,9 +37,26 @@ impl Drop for ShutdownGuard {
     fn drop(&mut self) {
         info!("shutdown guard: cleaning up");
 
-        // 1. Persist stream assignments + build Shutdown command from Shared
+        // 1. Persist stream assignments + restore custom inputs + build Shutdown command from Shared
         let cmd = if let Ok(mut shared) = self.svc.inner.try_lock() {
             shared.persist_stream_assignments();
+
+            // Restore custom input original values where configured
+            for ci in &shared.config.custom_inputs {
+                if ci.restore_on_exit {
+                    let id = ci.id();
+                    if let Some(&original) = shared.custom_input_originals.get(&id) {
+                        if let Some(handler) = shared.custom_input_handlers.get(&id) {
+                            if let Err(e) = handler.apply(original) {
+                                warn!("shutdown: custom input {}: failed to restore original: {e}", id);
+                            } else {
+                                info!("shutdown: custom input {} '{}': restored to {}", id, ci.name, original);
+                            }
+                        }
+                    }
+                }
+            }
+
             PwCommand::Shutdown {
                 original_default_sink: shared.original_default_sink.clone(),
                 original_default_source: shared.original_default_source.clone(),

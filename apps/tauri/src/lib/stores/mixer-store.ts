@@ -4,6 +4,7 @@ import { MixerApi, SystemApi } from "../api";
 import type {
   AppRuleInfo,
   CaptureDeviceInfo,
+  CustomInputInfo,
   FullState,
   InputInfo,
   OutputInfo,
@@ -26,6 +27,7 @@ interface MixerStore {
   streams: StreamInfo[];
   playbackDevices: PlaybackDeviceInfo[];
   captureDevices: CaptureDeviceInfo[];
+  customInputs: CustomInputInfo[];
   rules: AppRuleInfo[];
   selectedOutputId: number;
   defaultInputId: number;
@@ -46,6 +48,7 @@ interface MixerStore {
   setDaemonConnected: (connected: boolean) => void;
   refreshRules: () => Promise<void>;
   refreshCaptureDevices: () => Promise<void>;
+  refreshCustomInputs: () => Promise<void>;
 }
 
 export const useMixerStore = create<MixerStore>((set, get) => ({
@@ -59,6 +62,7 @@ export const useMixerStore = create<MixerStore>((set, get) => ({
   streams: [],
   playbackDevices: [],
   captureDevices: [],
+  customInputs: [],
   rules: [],
   selectedOutputId: 0,
   defaultInputId: 0,
@@ -76,9 +80,10 @@ export const useMixerStore = create<MixerStore>((set, get) => ({
       const state = await MixerApi.getFullState();
       get().setFullState(state);
       set({ daemonConnected: true });
-      // Fetch rules and capture devices separately (not in FullState)
+      // Fetch rules, capture devices, and custom inputs separately (not in FullState)
       get().refreshRules();
       get().refreshCaptureDevices();
+      get().refreshCustomInputs();
     } catch {
       set({ daemonConnected: false });
     }
@@ -111,6 +116,7 @@ export const useMixerStore = create<MixerStore>((set, get) => ({
       });
       get().refreshRules();
       get().refreshCaptureDevices();
+      get().refreshCustomInputs();
     });
 
     listen("mixer:disconnected", () => {
@@ -124,6 +130,10 @@ export const useMixerStore = create<MixerStore>((set, get) => ({
 
     listen("mixer:capture-devices-changed", () => {
       get().refreshCaptureDevices();
+    });
+
+    listen("mixer:custom-inputs-changed", () => {
+      get().refreshCustomInputs();
     });
   },
 
@@ -192,6 +202,13 @@ export const useMixerStore = create<MixerStore>((set, get) => ({
     try {
       const devices = await SystemApi.listCaptureDevices();
       set({ captureDevices: devices });
+    } catch { /* ignore if daemon not ready */ }
+  },
+
+  refreshCustomInputs: async () => {
+    try {
+      const customInputs = await SystemApi.listCustomInputs();
+      set({ customInputs });
     } catch { /* ignore if daemon not ready */ }
   },
 }));

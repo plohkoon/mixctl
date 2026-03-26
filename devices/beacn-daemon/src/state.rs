@@ -22,6 +22,8 @@ pub struct BeacnState {
     pub dial_sensitivity: u32,
     /// Exponential decay factor per frame (from config)
     pub level_decay: f64,
+    /// Custom inputs (non-audio controls with a single value)
+    pub custom_inputs: Vec<CustomInputEntry>,
 }
 
 #[derive(Clone)]
@@ -29,6 +31,14 @@ pub struct InputEntry {
     pub id: u32,
     pub name: String,
     pub color: (u8, u8, u8),
+}
+
+#[derive(Clone)]
+pub struct CustomInputEntry {
+    pub id: u32,
+    pub name: String,
+    pub color: (u8, u8, u8),
+    pub value: u8,
 }
 
 #[derive(Clone)]
@@ -61,6 +71,7 @@ impl BeacnState {
             levels_enabled: false,
             dial_sensitivity,
             level_decay,
+            custom_inputs: Vec::new(),
         }
     }
 
@@ -140,8 +151,35 @@ impl BeacnState {
         Ok(())
     }
 
+    /// Refresh custom inputs from the mixer daemon via D-Bus.
+    pub async fn refresh_custom_inputs(&mut self, proxy: &MixCtlProxy<'_>) -> anyhow::Result<()> {
+        let custom_inputs = proxy.list_custom_inputs().await?;
+        self.custom_inputs = custom_inputs
+            .iter()
+            .map(|ci| CustomInputEntry {
+                id: ci.id,
+                name: ci.name.clone(),
+                color: parse_hex_color(&ci.color).unwrap_or((128, 128, 128)),
+                value: ci.value,
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Check if a given input_id belongs to a custom input.
+    pub fn is_custom_input(&self, id: u32) -> bool {
+        self.custom_inputs.iter().any(|ci| ci.id == id)
+    }
+
+    /// Update the value of a custom input in local state.
+    pub fn set_custom_input_value(&mut self, id: u32, value: u8) {
+        if let Some(ci) = self.custom_inputs.iter_mut().find(|ci| ci.id == id) {
+            ci.value = value;
+        }
+    }
+
     pub fn max_page(&self) -> u32 {
-        let n = self.inputs.len() as u32;
+        let n = (self.inputs.len() + self.custom_inputs.len()) as u32;
         if n == 0 { 0 } else { (n - 1) / 4 }
     }
 
@@ -223,6 +261,7 @@ impl BeacnState {
             .map(|o| o.id)
             .unwrap_or(0);
 
+        let combined = self.inputs.len() + self.custom_inputs.len();
         let start = (self.current_page * 4) as usize;
         let mut visible_inputs: [Option<SlotView>; 4] = [None, None, None, None];
 
@@ -263,6 +302,21 @@ impl BeacnState {
                     global_muted,
                     level,
                     streams,
+                    is_custom: false,
+                });
+            } else if idx < combined {
+                let ci_idx = idx - self.inputs.len();
+                let ci = &self.custom_inputs[ci_idx];
+                visible_inputs[i] = Some(SlotView {
+                    input_id: ci.id,
+                    name: ci.name.clone(),
+                    color: ci.color,
+                    volume: ci.value,
+                    route_muted: false,
+                    global_muted: false,
+                    level: None,
+                    streams: vec![],
+                    is_custom: true,
                 });
             }
         }
@@ -324,6 +378,7 @@ mod tests {
             levels_enabled: false,
             dial_sensitivity: 2,
             level_decay: 0.8,
+            custom_inputs: Vec::new(),
         }
     }
 

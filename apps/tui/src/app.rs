@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use mixctl_core::config_sections::{BeacnConfig, ButtonAction, ButtonMapping, ButtonMappings, TuiConfig};
 use mixctl_core::dbus::MixCtlProxy;
 use mixctl_core::{
-    AppRuleInfo, CaptureDeviceInfo, CompressorInfo, ComponentInfo, DeesserInfo,
-    EqBandInfo, GateInfo, InputInfo, LimiterInfo, OutputInfo, PlaybackDeviceInfo,
-    RouteInfo, StreamInfo,
+    AppRuleInfo, CaptureDeviceInfo, CompressorInfo, ComponentInfo, CustomInputInfo,
+    DeesserInfo, EqBandInfo, GateInfo, InputInfo, LimiterInfo, OutputInfo,
+    PlaybackDeviceInfo, RouteInfo, StreamInfo,
 };
 
 /// Colour palette for cycling input/output colours.
@@ -151,6 +151,7 @@ pub enum DaemonSignal {
         streams: Vec<StreamInfo>,
         default_input: u32,
         default_output: u32,
+        custom_inputs: Vec<CustomInputInfo>,
     },
     RulesRefreshed(Vec<AppRuleInfo>),
     CaptureDevicesRefreshed(Vec<CaptureDeviceInfo>),
@@ -170,6 +171,7 @@ pub enum DaemonSignal {
         limiter: LimiterInfo,
     },
     ProfilesRefreshed(Vec<String>),
+    CustomInputsRefreshed(Vec<CustomInputInfo>),
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +191,7 @@ pub struct AppState {
     pub default_input: u32,
     pub default_output: u32,
     pub profiles: Vec<String>,
+    pub custom_inputs: Vec<CustomInputInfo>,
 
     // Config
     pub config: TuiConfig,
@@ -243,6 +246,7 @@ impl AppState {
         default_input: u32,
         default_output: u32,
         profiles: Vec<String>,
+        custom_inputs: Vec<CustomInputInfo>,
     ) -> Self {
         let beacn_connected = components.iter().any(|c| c.component_type == "beacn");
         Self {
@@ -257,6 +261,7 @@ impl AppState {
             default_input,
             default_output,
             profiles,
+            custom_inputs,
             config,
             beacn_connected,
             beacn_config,
@@ -302,6 +307,18 @@ impl AppState {
         self.outputs.get(col.checked_sub(1)?)
     }
 
+    /// Whether the given matrix row corresponds to a custom input.
+    /// Custom input rows come after all regular input rows (1..=inputs.len()).
+    pub fn is_custom_input_row(&self, row: usize) -> bool {
+        row > self.inputs.len() && row <= self.inputs.len() + self.custom_inputs.len()
+    }
+
+    /// Get the custom input for a matrix row, if it is a custom input row.
+    pub fn custom_input_at_row(&self, row: usize) -> Option<&CustomInputInfo> {
+        let ci_idx = row.checked_sub(self.inputs.len() + 1)?;
+        self.custom_inputs.get(ci_idx)
+    }
+
     /// Number of items in the currently focused footer section.
     pub fn footer_item_count(&self) -> usize {
         match self.focus {
@@ -314,7 +331,7 @@ impl AppState {
     }
 
     fn clamp_cursors(&mut self) {
-        let max_row = self.inputs.len(); // 0=header, 1..=N inputs
+        let max_row = self.inputs.len() + self.custom_inputs.len(); // 0=header, 1..=N inputs, N+1..=N+C custom inputs
         let max_col = self.outputs.len();
         if max_row > 0 {
             self.matrix_row = self.matrix_row.clamp(0, max_row);
@@ -361,13 +378,14 @@ impl AppState {
                 self.outputs = outputs;
             }
             DaemonSignal::StreamsRefreshed(streams) => self.streams = streams,
-            DaemonSignal::FullRefresh { inputs, outputs, all_routes, streams, default_input, default_output } => {
+            DaemonSignal::FullRefresh { inputs, outputs, all_routes, streams, default_input, default_output, custom_inputs } => {
                 self.inputs = inputs;
                 self.outputs = outputs;
                 self.all_routes = all_routes;
                 self.streams = streams;
                 self.default_input = default_input;
                 self.default_output = default_output;
+                self.custom_inputs = custom_inputs;
             }
             DaemonSignal::RulesRefreshed(rules) => self.rules = rules,
             DaemonSignal::CaptureDevicesRefreshed(devices) => self.capture_devices = devices,
@@ -390,6 +408,9 @@ impl AppState {
             }
             DaemonSignal::ProfilesRefreshed(profiles) => {
                 self.profiles = profiles;
+            }
+            DaemonSignal::CustomInputsRefreshed(custom_inputs) => {
+                self.custom_inputs = custom_inputs;
             }
         }
         self.clamp_cursors();
@@ -416,7 +437,7 @@ impl AppState {
                 }
             }
             AppAction::CursorDown => {
-                if self.matrix_row < self.inputs.len() {
+                if self.matrix_row < self.inputs.len() + self.custom_inputs.len() {
                     self.matrix_row += 1;
                 }
             }
@@ -434,7 +455,13 @@ impl AppState {
             // -- Volume --
             AppAction::VolumeUp { fine } => {
                 let step: i16 = if fine { self.config.volume_fine_step as i16 } else { self.config.volume_step as i16 };
-                if self.matrix_row == 0 && self.matrix_col >= 1 {
+                if self.is_custom_input_row(self.matrix_row) {
+                    // Custom input row: adjust custom input value
+                    if let Some(ci) = self.custom_input_at_row(self.matrix_row) {
+                        let new_val = (ci.value as i16 + step).min(100) as u8;
+                        proxy.set_custom_input_value(ci.id, new_val).await.ok();
+                    }
+                } else if self.matrix_row == 0 && self.matrix_col >= 1 {
                     // Output header row: adjust output master volume
                     if let Some(output) = self.output_at_col(self.matrix_col) {
                         let new_vol = (output.volume as i16 + step).min(100) as u8;
@@ -450,7 +477,12 @@ impl AppState {
             }
             AppAction::VolumeDown { fine } => {
                 let step: i16 = if fine { self.config.volume_fine_step as i16 } else { self.config.volume_step as i16 };
-                if self.matrix_row == 0 && self.matrix_col >= 1 {
+                if self.is_custom_input_row(self.matrix_row) {
+                    if let Some(ci) = self.custom_input_at_row(self.matrix_row) {
+                        let new_val = (ci.value as i16 - step).max(0) as u8;
+                        proxy.set_custom_input_value(ci.id, new_val).await.ok();
+                    }
+                } else if self.matrix_row == 0 && self.matrix_col >= 1 {
                     if let Some(output) = self.output_at_col(self.matrix_col) {
                         let new_vol = (output.volume as i16 - step).max(0) as u8;
                         proxy.set_output_volume(output.id, new_vol).await.ok();
@@ -463,7 +495,9 @@ impl AppState {
                 }
             }
             AppAction::ToggleMute => {
-                if self.matrix_row == 0 && self.matrix_col >= 1 {
+                if self.is_custom_input_row(self.matrix_row) {
+                    // Mute is a no-op for custom inputs
+                } else if self.matrix_row == 0 && self.matrix_col >= 1 {
                     if let Some(output) = self.output_at_col(self.matrix_col) {
                         proxy.set_output_mute(output.id, !output.muted).await.ok();
                     }

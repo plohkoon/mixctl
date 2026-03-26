@@ -1,6 +1,6 @@
 use mixctl_core::{
-    AppRuleInfo, CaptureDeviceInfo, ComponentInfo, InputInfo, OutputInfo, PlaybackDeviceInfo,
-    RouteInfo, StreamInfo, parse_hex_color,
+    AppRuleInfo, CaptureDeviceInfo, ComponentInfo, CustomInputInfo, InputInfo, OutputInfo,
+    PlaybackDeviceInfo, RouteInfo, StreamInfo, parse_hex_color,
 };
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
@@ -1739,6 +1739,188 @@ impl Service {
         Ok(())
     }
 
+    // -- Custom inputs --
+
+    async fn list_custom_inputs(&self) -> zbus::fdo::Result<Vec<CustomInputInfo>> {
+        let shared = self.inner.lock().await;
+        let out: Vec<CustomInputInfo> = shared
+            .config
+            .custom_inputs
+            .iter()
+            .map(|ci| CustomInputInfo {
+                id: ci.id(),
+                name: ci.name.clone(),
+                color: ci.color.clone(),
+                custom_type: ci.custom_type.clone(),
+                value: shared.state.custom_input_value(ci.id()),
+            })
+            .collect();
+        Ok(out)
+    }
+
+    async fn add_custom_input(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        name: &str,
+        color: &str,
+        custom_type: &str,
+        params_json: &str,
+    ) -> zbus::fdo::Result<u32> {
+        if name.is_empty() || name.len() > 50 {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "name must be 1-50 characters".into(),
+            ));
+        }
+        if parse_hex_color(color).is_none() {
+            return Err(zbus::fdo::Error::InvalidArgs(format!(
+                "invalid hex color '{}'",
+                color
+            )));
+        }
+
+        // Parse params from JSON
+        let params: std::collections::HashMap<String, toml::Value> = if params_json.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let json_val: serde_json::Value = serde_json::from_str(params_json)
+                .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("invalid params JSON: {e}")))?;
+            json_to_toml_map(&json_val)
+                .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("params conversion failed: {e}")))?
+        };
+
+        // Try creating the handler to validate the type and params
+        let handler = crate::custom_inputs::create_handler(custom_type, &params)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("failed to create handler: {e}")))?;
+
+        let mut shared = self.inner.lock().await;
+        let id = shared.config.next_unused_id();
+
+        // Read original value if handler supports it
+        let original = if handler.supports_read() {
+            match handler.read_current() {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("custom input {}: failed to read original value: {e}", id);
+                    50
+                }
+            }
+        } else {
+            50
+        };
+
+        shared.config.custom_inputs.push(crate::config::CustomInputConfig {
+            id: Some(id),
+            name: name.to_string(),
+            color: color.to_string(),
+            custom_type: custom_type.to_string(),
+            restore_on_exit: true,
+            params,
+        });
+        shared.state.set_custom_input_value(id, original);
+        shared.config_dirty = true;
+        shared.state_dirty = true;
+        shared.custom_input_originals.insert(id, original);
+        shared.custom_input_handlers.insert(id, handler);
+
+        info!("added custom input {} '{}' (type={}, original={})", id, name, custom_type, original);
+
+        drop(shared);
+        Self::custom_input_changed(&emitter, id).await.ok();
+        Ok(id)
+    }
+
+    async fn remove_custom_input(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+    ) -> zbus::fdo::Result<()> {
+        let mut shared = self.inner.lock().await;
+        let idx = shared
+            .config
+            .custom_inputs
+            .iter()
+            .position(|c| c.id() == id)
+            .ok_or_else(|| zbus::fdo::Error::Failed(format!("custom input id {} not found", id)))?;
+
+        let restore = shared.config.custom_inputs[idx].restore_on_exit;
+
+        // Restore original value if configured
+        if restore {
+            if let Some(&original) = shared.custom_input_originals.get(&id) {
+                if let Some(handler) = shared.custom_input_handlers.get(&id) {
+                    if let Err(e) = handler.apply(original) {
+                        warn!("custom input {}: failed to restore original value: {e}", id);
+                    }
+                }
+            }
+        }
+
+        shared.config.custom_inputs.remove(idx);
+        shared.state.custom_input_values.remove(&id.to_string());
+        shared.custom_input_handlers.remove(&id);
+        shared.custom_input_originals.remove(&id);
+        shared.config_dirty = true;
+        shared.state_dirty = true;
+
+        info!("removed custom input {}", id);
+
+        drop(shared);
+        Self::custom_input_changed(&emitter, id).await.ok();
+        Ok(())
+    }
+
+    async fn get_custom_input_value(&self, id: u32) -> zbus::fdo::Result<u8> {
+        let shared = self.inner.lock().await;
+        if !shared.config.is_custom_input(id) {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "custom input id {} not found",
+                id
+            )));
+        }
+        Ok(shared.state.custom_input_value(id))
+    }
+
+    async fn set_custom_input_value(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: u32,
+        value: u8,
+    ) -> zbus::fdo::Result<()> {
+        let value = value.min(100);
+        let mut shared = self.inner.lock().await;
+        if !shared.config.is_custom_input(id) {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "custom input id {} not found",
+                id
+            )));
+        }
+
+        // Apply via handler
+        if let Some(handler) = shared.custom_input_handlers.get(&id) {
+            // Check if this is a DSP parameter handler (special case)
+            if let Some((_channel_id, _param, _min, _max)) = handler.as_dsp_parameter() {
+                // DSP parameter: would need to issue PW commands here
+                // For now, just log it
+                let mapped = _min + (value as f64 / 100.0) * (_max - _min);
+                info!(
+                    "custom input {}: dsp_parameter channel={} param={} mapped_value={}",
+                    id, _channel_id, _param, mapped
+                );
+            } else if let Err(e) = handler.apply(value) {
+                warn!("custom input {}: handler.apply failed: {e}", id);
+            }
+        }
+
+        shared.state.set_custom_input_value(id, value);
+        shared.state_dirty = true;
+
+        shared.signal_tx.send(ServiceSignal::CustomInputChanged { id }).ok();
+
+        drop(shared);
+        Self::custom_input_changed(&emitter, id).await.ok();
+        Ok(())
+    }
+
     // -- Signals --
 
     #[zbus(signal)]
@@ -1804,6 +1986,51 @@ impl Service {
 
     #[zbus(signal)]
     async fn profile_changed(emitter: &SignalEmitter<'_>, name: String) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn custom_input_changed(emitter: &SignalEmitter<'_>, id: u32) -> zbus::Result<()>;
+}
+
+/// Convert a JSON object to a HashMap<String, toml::Value> for custom input params.
+fn json_to_toml_map(
+    json: &serde_json::Value,
+) -> anyhow::Result<std::collections::HashMap<String, toml::Value>> {
+    let obj = json
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("expected JSON object"))?;
+    let mut map = std::collections::HashMap::new();
+    for (k, v) in obj {
+        map.insert(k.clone(), json_val_to_toml(v)?);
+    }
+    Ok(map)
+}
+
+fn json_val_to_toml(v: &serde_json::Value) -> anyhow::Result<toml::Value> {
+    match v {
+        serde_json::Value::Bool(b) => Ok(toml::Value::Boolean(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(toml::Value::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(toml::Value::Float(f))
+            } else {
+                anyhow::bail!("unsupported number type")
+            }
+        }
+        serde_json::Value::String(s) => Ok(toml::Value::String(s.clone())),
+        serde_json::Value::Object(obj) => {
+            let mut table = toml::map::Map::new();
+            for (k, v) in obj {
+                table.insert(k.clone(), json_val_to_toml(v)?);
+            }
+            Ok(toml::Value::Table(table))
+        }
+        serde_json::Value::Array(arr) => {
+            let vals: Result<Vec<_>, _> = arr.iter().map(json_val_to_toml).collect();
+            Ok(toml::Value::Array(vals?))
+        }
+        serde_json::Value::Null => Ok(toml::Value::String(String::new())),
+    }
 }
 
 fn profile_dir() -> std::path::PathBuf {
@@ -1878,5 +2105,12 @@ impl Service {
         name: String,
     ) -> zbus::Result<()> {
         Self::profile_changed(emitter, name).await
+    }
+
+    pub async fn emit_custom_input_changed(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+    ) -> zbus::Result<()> {
+        Self::custom_input_changed(emitter, id).await
     }
 }

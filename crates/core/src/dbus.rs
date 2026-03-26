@@ -1,7 +1,7 @@
 use crate::{
-    AppRuleInfo, CaptureDeviceInfo, CompressorInfo, ComponentInfo, DeesserInfo,
-    EqBandInfo, GateInfo, InputInfo, LimiterInfo, OutputInfo, PlaybackDeviceInfo,
-    RouteInfo, StreamInfo,
+    AppRuleInfo, CaptureDeviceInfo, CompressorInfo, ComponentInfo, CustomInputInfo,
+    DeesserInfo, EqBandInfo, GateInfo, InputInfo, LimiterInfo, OutputInfo,
+    PlaybackDeviceInfo, RouteInfo, StreamInfo,
 };
 
 pub const BUS_NAME: &str = "dev.greghuber.MixCtl";
@@ -115,6 +115,13 @@ pub trait MixCtl {
     fn set_capture_noise_suppression(&self, input_id: u32, enabled: bool) -> zbus::Result<()>;
     fn get_capture_noise_suppression(&self, input_id: u32) -> zbus::Result<bool>;
 
+    // Custom inputs (non-audio dial controls)
+    fn list_custom_inputs(&self) -> zbus::Result<Vec<CustomInputInfo>>;
+    fn add_custom_input(&self, name: &str, color: &str, custom_type: &str, params_json: &str) -> zbus::Result<u32>;
+    fn remove_custom_input(&self, id: u32) -> zbus::Result<()>;
+    fn get_custom_input_value(&self, id: u32) -> zbus::Result<u8>;
+    fn set_custom_input_value(&self, id: u32, value: u8) -> zbus::Result<()>;
+
     // Profiles
     fn list_profiles(&self) -> zbus::Result<Vec<String>>;
     fn save_profile(&self, name: &str) -> zbus::Result<()>;
@@ -169,4 +176,7 @@ pub trait MixCtl {
 
     #[zbus(signal)]
     fn profile_changed(&self, name: String) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn custom_input_changed(&self, id: u32) -> zbus::Result<()>;
 }

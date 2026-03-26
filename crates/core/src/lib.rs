@@ -64,6 +64,15 @@ pub struct ComponentInfo {
     pub component_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct CustomInputInfo {
+    pub id: u32,
+    pub name: String,
+    pub color: String,
+    pub custom_type: String,
+    pub value: u8,
+}
+
 // ---------------------------------------------------------------------------
 // DSP types (D-Bus serializable)
 // ---------------------------------------------------------------------------

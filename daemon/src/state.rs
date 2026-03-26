@@ -47,6 +47,8 @@ pub struct StateFile {
     pub output_compressor: HashMap<String, CompressorDspState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub output_limiter: HashMap<String, LimiterDspState>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub custom_input_values: HashMap<String, u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +234,7 @@ impl Default for StateFile {
             input_deesser: HashMap::new(),
             output_compressor: HashMap::new(),
             output_limiter: HashMap::new(),
+            custom_input_values: HashMap::new(),
         }
     }
 }
@@ -528,6 +531,20 @@ impl StateFile {
             .entry(id.to_string())
             .or_insert_with(LimiterDspState::default)
     }
+
+    // -- Custom input value accessors --
+
+    pub fn custom_input_value(&self, id: u32) -> u8 {
+        self.custom_input_values
+            .get(&id.to_string())
+            .copied()
+            .unwrap_or(50)
+    }
+
+    pub fn set_custom_input_value(&mut self, id: u32, value: u8) {
+        self.custom_input_values
+            .insert(id.to_string(), value);
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +570,7 @@ mod tests {
             default_input: None,
             default_output: None,
             app_rules: Vec::new(),
+            custom_inputs: vec![],
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),

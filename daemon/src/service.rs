@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::audio::{PwCommand, PwEvent};
 use crate::audio::volume::combine_pw_volume;
 use crate::config::{ChannelConfig, ConfigFile};
+use crate::custom_inputs::CustomInputHandler;
 use crate::state::{CaptureDeviceState, OutputState, PlaybackDeviceState, RouteState, StateFile, StreamState};
 
 pub enum ServiceSignal {
@@ -21,6 +22,7 @@ pub enum ServiceSignal {
     BroadcastLevelsChanged { enabled: bool },
     ConfigSectionChanged { section: String },
     ComponentChanged,
+    CustomInputChanged { id: u32 },
 }
 
 impl ServiceSignal {
@@ -50,6 +52,9 @@ impl ServiceSignal {
             Self::ComponentChanged => {
                 Service::emit_component_changed(emitter).await.ok();
             }
+            Self::CustomInputChanged { id } => {
+                Service::emit_custom_input_changed(emitter, *id).await.ok();
+            }
         }
     }
 }
@@ -76,6 +81,10 @@ pub struct Shared {
     pub input_levels: HashMap<u32, f32>,
     /// Registered components: bus_name → component_type
     pub components: HashMap<String, String>,
+    /// Custom input handlers keyed by custom input ID
+    pub custom_input_handlers: HashMap<u32, Box<dyn CustomInputHandler>>,
+    /// Original values for custom inputs (for restore_on_exit)
+    pub custom_input_originals: HashMap<u32, u8>,
 }
 
 impl Shared {
@@ -141,6 +150,8 @@ impl Service {
         state: StateFile,
         pw_commands: tokio::sync::mpsc::UnboundedSender<PwCommand>,
         signal_tx: tokio::sync::mpsc::UnboundedSender<ServiceSignal>,
+        custom_input_handlers: HashMap<u32, Box<dyn CustomInputHandler>>,
+        custom_input_originals: HashMap<u32, u8>,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Shared {
@@ -159,6 +170,8 @@ impl Service {
                 original_stream_targets: HashMap::new(),
                 input_levels: HashMap::new(),
                 components: HashMap::new(),
+                custom_input_handlers,
+                custom_input_originals,
             })),
         }
     }
@@ -382,6 +395,7 @@ mod tests {
             default_input: None,
             default_output: None,
             app_rules: rules,
+            custom_inputs: vec![],
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
@@ -405,6 +419,8 @@ mod tests {
             original_stream_targets: HashMap::new(),
             input_levels: HashMap::new(),
             components: HashMap::new(),
+            custom_input_handlers: HashMap::new(),
+            custom_input_originals: HashMap::new(),
         }
     }
 

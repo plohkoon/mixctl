@@ -3,6 +3,7 @@ import type {
   AppRuleInfo,
   CaptureDeviceInfo,
   ComponentInfo,
+  CustomInputInfo,
   EqBandInfo,
   FullState,
   InputDspState,
@@ -183,4 +184,11 @@ export const SystemApi = {
   saveProfile: (name: string) => invoke("save_profile", { name }),
   loadProfile: (name: string) => invoke("load_profile", { name }),
   deleteProfile: (name: string) => invoke("delete_profile", { name }),
+  // Custom inputs
+  listCustomInputs: () => invoke<CustomInputInfo[]>("list_custom_inputs"),
+  addCustomInput: (name: string, color: string, customType: string, paramsJson: string) =>
+    invoke<number>("add_custom_input", { name, color, customType, paramsJson }),
+  removeCustomInput: (id: number) => invoke("remove_custom_input", { id }),
+  setCustomInputValue: (id: number, value: number) =>
+    invoke("set_custom_input_value", { id, value }),
 };

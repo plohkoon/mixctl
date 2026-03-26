@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -22,6 +22,8 @@ pub struct ConfigFile {
     pub default_output: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_inputs: Vec<CustomInputConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadcast_levels: Option<bool>,
     #[serde(default, skip_serializing_if = "is_default")]
@@ -54,6 +56,35 @@ pub struct AppRule {
     pub input_id: u32,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(val: &bool) -> bool {
+    *val
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomInputConfig {
+    #[serde(default)]
+    pub id: Option<u32>,
+    pub name: String,
+    pub color: String,
+    pub custom_type: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub restore_on_exit: bool,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub params: HashMap<String, toml::Value>,
+}
+
+impl CustomInputConfig {
+    /// Returns the id, panicking if it hasn't been assigned yet.
+    /// Only call after `fixup_ids()` has run.
+    pub fn id(&self) -> u32 {
+        self.id.expect("custom input id not assigned; fixup_ids() must run first")
+    }
+}
+
 impl ChannelConfig {
     /// Returns the id, panicking if it hasn't been assigned yet.
     /// Only call after `fixup_ids()` has run.
@@ -81,6 +112,7 @@ impl Default for ConfigFile {
             default_input: Some(1),
             default_output: Some(6),
             app_rules: Vec::new(),
+            custom_inputs: Vec::new(),
             broadcast_levels: None,
             beacn: BeacnConfig::default(),
             ui: UiConfig::default(),
@@ -122,34 +154,14 @@ impl ConfigFile {
     }
 
     /// Assign IDs to any entries missing one, and deduplicate.
-    /// Shared ID space across both inputs and outputs.
+    /// Shared ID space across inputs, outputs, and custom inputs.
     fn fixup_ids(&mut self) {
         let mut seen = HashSet::new();
         for entry in self.inputs.iter_mut().chain(self.outputs.iter_mut()) {
-            match entry.id {
-                Some(id) if id > 0 && seen.insert(id) => {
-                    // valid unique id, keep it
-                }
-                Some(id) => {
-                    // duplicate or zero
-                    let new_id = next_unused_id(&seen);
-                    warn!(
-                        "'{}' has duplicate/invalid id {}, reassigning to {}",
-                        entry.name, id, new_id
-                    );
-                    seen.insert(new_id);
-                    entry.id = Some(new_id);
-                }
-                None => {
-                    let new_id = next_unused_id(&seen);
-                    warn!(
-                        "'{}' missing id, assigning {}",
-                        entry.name, new_id
-                    );
-                    seen.insert(new_id);
-                    entry.id = Some(new_id);
-                }
-            }
+            fixup_entry_id(&mut seen, &mut entry.id, &entry.name);
+        }
+        for entry in &mut self.custom_inputs {
+            fixup_entry_id(&mut seen, &mut entry.id, &entry.name);
         }
     }
 
@@ -182,18 +194,58 @@ impl ConfigFile {
     }
 
     pub fn next_unused_id(&self) -> u32 {
-        let used: HashSet<u32> = self.inputs.iter()
+        let mut used: HashSet<u32> = self.inputs.iter()
             .chain(self.outputs.iter())
             .map(|c| c.id())
             .collect();
+        for ci in &self.custom_inputs {
+            used.insert(ci.id());
+        }
         next_unused_id(&used)
     }
 
+    #[allow(dead_code)]
+    pub fn find_custom_input(&self, id: u32) -> Option<&CustomInputConfig> {
+        self.custom_inputs.iter().find(|c| c.id() == id)
+    }
+
+    #[allow(dead_code)]
+    pub fn find_custom_input_mut(&mut self, id: u32) -> Option<&mut CustomInputConfig> {
+        self.custom_inputs.iter_mut().find(|c| c.id() == id)
+    }
+
+    pub fn is_custom_input(&self, id: u32) -> bool {
+        self.custom_inputs.iter().any(|c| c.id() == id)
+    }
 }
 
 /// Find the smallest positive integer not in `used`.
 fn next_unused_id(used: &HashSet<u32>) -> u32 {
     (1..).find(|id| !used.contains(id)).unwrap()
+}
+
+/// Helper: fix up a single ID entry (assign new if missing/duplicate/zero).
+fn fixup_entry_id(seen: &mut HashSet<u32>, id: &mut Option<u32>, name: &str) {
+    match *id {
+        Some(v) if v > 0 && seen.insert(v) => {
+            // valid unique id, keep it
+        }
+        Some(v) => {
+            let new_id = next_unused_id(seen);
+            warn!(
+                "'{}' has duplicate/invalid id {}, reassigning to {}",
+                name, v, new_id
+            );
+            seen.insert(new_id);
+            *id = Some(new_id);
+        }
+        None => {
+            let new_id = next_unused_id(seen);
+            warn!("'{}' missing id, assigning {}", name, new_id);
+            seen.insert(new_id);
+            *id = Some(new_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +274,7 @@ mod tests {
             default_input: None,
             default_output: None,
             app_rules: Vec::new(),
+            custom_inputs: vec![],
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
@@ -252,6 +305,7 @@ mod tests {
             default_input: None,
             default_output: None,
             app_rules: Vec::new(),
+            custom_inputs: vec![],
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
@@ -280,6 +334,7 @@ mod tests {
             default_input: None,
             default_output: None,
             app_rules: Vec::new(),
+            custom_inputs: vec![],
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
@@ -306,6 +361,7 @@ mod tests {
             default_input: None,
             default_output: None,
             app_rules: Vec::new(),
+            custom_inputs: vec![],
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),
@@ -351,6 +407,7 @@ mod tests {
             default_input: None,
             default_output: None,
             app_rules: Vec::new(),
+            custom_inputs: vec![],
             broadcast_levels: None,
             beacn: Default::default(),
             ui: Default::default(),

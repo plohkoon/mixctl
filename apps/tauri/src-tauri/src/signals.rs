@@ -50,6 +50,7 @@ async fn run_signal_loop(app: &AppHandle) -> Result<(), Box<dyn std::error::Erro
         spawn_profile_changed(app.clone(), proxy.clone(), disc_tx.clone()),
         spawn_rules_changed(app.clone(), proxy.clone(), disc_tx.clone()),
         spawn_capture_devices_changed(app.clone(), proxy.clone(), disc_tx.clone()),
+        spawn_custom_input_changed(app.clone(), proxy.clone(), disc_tx.clone()),
     ];
 
     app.emit("mixer:connected", ()).ok();
@@ -269,6 +270,23 @@ fn spawn_capture_devices_changed(
         };
         while stream.next().await.is_some() {
             app.emit("mixer:capture-devices-changed", ()).ok();
+        }
+        disc.send(()).ok();
+    })
+}
+
+fn spawn_custom_input_changed(
+    app: AppHandle,
+    proxy: MixCtlProxy<'static>,
+    disc: tokio::sync::mpsc::UnboundedSender<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(mut stream) = proxy.receive_custom_input_changed().await else {
+            disc.send(()).ok();
+            return;
+        };
+        while stream.next().await.is_some() {
+            app.emit("mixer:custom-inputs-changed", ()).ok();
         }
         disc.send(()).ok();
     })

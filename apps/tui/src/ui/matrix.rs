@@ -177,8 +177,59 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         }
     }
 
-    // Fill remaining body space if inputs don't fill it
-    let used_rows = num_inputs as u16;
+    // ── Rows N+1..=N+C: custom input rows ────────────────────────────────
+    let num_custom = state.custom_inputs.len();
+    for (ci_idx, ci) in state.custom_inputs.iter().enumerate() {
+        let row_idx = num_inputs + ci_idx + 1; // 1-based, after all regular inputs
+        let y = body_y + (num_inputs + ci_idx) as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+
+        let is_row_cursor = is_focused && state.matrix_row == row_idx;
+        let color = parse_color(&ci.color);
+
+        // Custom input label (col 0) — prefixed with gear icon
+        let label_area = Rect::new(area.x, y, LABEL_COL_WIDTH, 1);
+        let is_label_cursor = is_row_cursor && state.matrix_col == 0;
+
+        let label = truncate(&format!("\u{2699} {}", ci.name), LABEL_COL_WIDTH as usize);
+
+        let label_style = if is_label_cursor {
+            Style::default().fg(color).bold().reversed()
+        } else if is_row_cursor {
+            Style::default().fg(color).bold()
+        } else {
+            Style::default().fg(color)
+        };
+        frame.render_widget(Paragraph::new(label).style(label_style), label_area);
+
+        // Custom inputs have a single value shown in every output column
+        for (oi, _output) in state.outputs.iter().enumerate() {
+            let col_idx = oi + 1;
+            let x = area.x + LABEL_COL_WIDTH + (oi as u16) * col_width;
+            if x >= area.x + area.width {
+                break;
+            }
+            let w = col_width.min(area.width.saturating_sub(x - area.x));
+            let cell_area = Rect::new(x, y, w, 1);
+
+            let is_cell_cursor =
+                is_focused && state.matrix_row == row_idx && state.matrix_col == col_idx;
+            let col_highlight = is_focused && state.matrix_col == col_idx;
+
+            if is_cell_cursor {
+                render_volume_bar(frame, cell_area, ci.value, false, color, true);
+            } else if is_row_cursor || col_highlight {
+                render_volume_bar_subtle(frame, cell_area, ci.value, false, color);
+            } else {
+                render_volume_bar(frame, cell_area, ci.value, false, color, false);
+            }
+        }
+    }
+
+    // Fill remaining body space if inputs + custom inputs don't fill it
+    let used_rows = (num_inputs + num_custom) as u16;
     if used_rows < body_height {
         let empty_area = Rect::new(area.x, body_y + used_rows, area.width, body_height - used_rows);
         frame.render_widget(

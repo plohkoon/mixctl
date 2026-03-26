@@ -33,6 +33,7 @@ pub async fn connect_and_load() -> Result<(MixCtlProxy<'static>, AppState)> {
     let default_input = proxy.get_default_input().await.unwrap_or(0);
     let default_output = proxy.get_default_output().await.unwrap_or(0);
     let profiles = proxy.list_profiles().await.unwrap_or_default();
+    let custom_inputs = proxy.list_custom_inputs().await.unwrap_or_default();
 
     let beacn_config = match proxy.get_config_section("beacn").await {
         Ok(json) => serde_json::from_str::<BeacnConfig>(&json).ok(),
@@ -58,6 +59,7 @@ pub async fn connect_and_load() -> Result<(MixCtlProxy<'static>, AppState)> {
         default_input,
         default_output,
         profiles,
+        custom_inputs,
     );
 
     // Load initial DSP state for all inputs
@@ -296,6 +298,18 @@ pub async fn subscribe_signals(
         }
     });
 
+    // custom_input_changed → re-fetch custom inputs
+    let p = proxy.clone();
+    let t = tx.clone();
+    let mut stream = proxy.receive_custom_input_changed().await?;
+    tokio::spawn(async move {
+        while stream.next().await.is_some() {
+            if let Ok(custom_inputs) = p.list_custom_inputs().await {
+                t.send(DaemonSignal::CustomInputsRefreshed(custom_inputs)).ok();
+            }
+        }
+    });
+
     Ok(rx)
 }
 
@@ -317,6 +331,7 @@ async fn send_full_refresh(
 
     let default_input = proxy.get_default_input().await.unwrap_or(0);
     let default_output = proxy.get_default_output().await.unwrap_or(0);
+    let custom_inputs = proxy.list_custom_inputs().await.unwrap_or_default();
 
     tx.send(DaemonSignal::FullRefresh {
         inputs,
@@ -325,5 +340,6 @@ async fn send_full_refresh(
         streams,
         default_input,
         default_output,
+        custom_inputs,
     }).ok();
 }

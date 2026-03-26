@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useMixerStore } from "../lib/stores/mixer-store";
 import Header from "../components/layout/Header";
 import MatrixGrid from "../components/mixer/MatrixGrid";
+import CustomInputsSection from "../components/mixer/CustomInputsSection";
 import FooterBar from "../components/mixer/FooterBar";
 import ExpandedFooter from "../components/mixer/ExpandedFooter";
 
@@ -24,6 +25,7 @@ export default function MainPage() {
       <div className="flex-1 overflow-auto">
         <MatrixGrid />
       </div>
+      <CustomInputsSection />
       <FooterBar onToggleExpand={toggleExpanded} />
 
       {/* Expanded footer overlay */}

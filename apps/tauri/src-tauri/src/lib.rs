@@ -68,6 +68,11 @@ pub fn run() {
             commands::dsp::set_output_limiter_enabled,
             commands::dsp::set_output_limiter,
             commands::dsp::compute_eq_curve,
+            // custom inputs
+            commands::custom_inputs::list_custom_inputs,
+            commands::custom_inputs::add_custom_input,
+            commands::custom_inputs::remove_custom_input,
+            commands::custom_inputs::set_custom_input_value,
             // system
             commands::system::list_app_rules,
             commands::system::set_app_rule,

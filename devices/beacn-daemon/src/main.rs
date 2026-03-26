@@ -184,6 +184,9 @@ async fn run_daemon_session(
         if let Err(e) = s.refresh_streams(&proxy).await {
             warn!("initial stream fetch failed: {e}");
         }
+        if let Err(e) = s.refresh_custom_inputs(&proxy).await {
+            warn!("initial custom inputs fetch failed: {e}");
+        }
         match proxy.get_broadcast_levels().await {
             Ok(enabled) => s.levels_enabled = enabled,
             Err(e) => warn!("get_broadcast_levels failed: {e}"),
@@ -312,6 +315,23 @@ async fn run_daemon_session(
         }
     }));
 
+    // custom_input_changed → refresh custom inputs
+    let s_ci = state.clone();
+    let t_ci = dev_cmd_tx.clone();
+    let p_ci = proxy.clone();
+    let mut custom_input_changed = proxy.receive_custom_input_changed().await?;
+    signal_tasks.push(tokio::spawn(async move {
+        while custom_input_changed.next().await.is_some() {
+            let mut s = s_ci.lock().await;
+            if let Err(e) = s.refresh_custom_inputs(&p_ci).await {
+                warn!("custom input refresh failed: {e}");
+                continue;
+            }
+            let snapshot = s.build_snapshot();
+            t_ci.send(DeviceCommand::UpdateState(snapshot)).ok();
+        }
+    }));
+
     // input_levels_changed — ~20Hz updates
     let s7 = state.clone();
     let t7 = dev_cmd_tx.clone();
@@ -368,6 +388,9 @@ async fn run_daemon_session(
                 if let Err(e) = s.refresh_streams(&proxy).await {
                     warn!("stream refresh failed: {e}");
                 }
+                if let Err(e) = s.refresh_custom_inputs(&proxy).await {
+                    warn!("custom input refresh failed: {e}");
+                }
                 let snapshot = s.build_snapshot();
                 dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
             }
@@ -376,18 +399,35 @@ async fn run_daemon_session(
             }
             DeviceEvent::AdjustRouteVolume { input_id, output_id, delta } => {
                 let mut s = state.lock().await;
-                let old_vol = s.route_volume(input_id, output_id);
-                let sensitivity = s.dial_sensitivity as i16;
-                let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
-                if let Err(e) = proxy.set_route_volume(input_id, output_id, new_vol).await {
-                    warn!("set_route_volume failed: {e}");
+                if s.is_custom_input(input_id) {
+                    // Custom input: single value, not route-based
+                    let old = s.custom_inputs.iter().find(|ci| ci.id == input_id).map(|ci| ci.value).unwrap_or(50);
+                    let sensitivity = s.dial_sensitivity as i16;
+                    let new_val = (old as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+                    drop(s);
+                    proxy.set_custom_input_value(input_id, new_val).await.ok();
+                    let mut s = state.lock().await;
+                    s.set_custom_input_value(input_id, new_val);
+                    let snapshot = s.build_snapshot();
+                    dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
+                } else {
+                    let old_vol = s.route_volume(input_id, output_id);
+                    let sensitivity = s.dial_sensitivity as i16;
+                    let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+                    if let Err(e) = proxy.set_route_volume(input_id, output_id, new_vol).await {
+                        warn!("set_route_volume failed: {e}");
+                    }
+                    s.set_route_volume(input_id, output_id, new_vol);
+                    let snapshot = s.build_snapshot();
+                    dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
                 }
-                s.set_route_volume(input_id, output_id, new_vol);
-                let snapshot = s.build_snapshot();
-                dev_cmd_tx.send(DeviceCommand::UpdateState(snapshot)).ok();
             }
             DeviceEvent::ToggleRouteMute { input_id, output_id } => {
                 let mut s = state.lock().await;
+                if s.is_custom_input(input_id) {
+                    // No mute concept for custom inputs — skip
+                    continue;
+                }
                 let muted = s.route_muted(input_id, output_id);
                 if let Err(e) = proxy.set_route_mute(input_id, output_id, !muted).await {
                     warn!("set_route_mute failed: {e}");
@@ -398,6 +438,10 @@ async fn run_daemon_session(
             }
             DeviceEvent::ToggleGlobalMute { input_id } => {
                 let mut s = state.lock().await;
+                if s.is_custom_input(input_id) {
+                    // No mute concept for custom inputs — skip
+                    continue;
+                }
                 let all_muted = s.is_globally_muted(input_id);
                 let new_muted = !all_muted;
                 for &output_id in &s.output_ids() {
@@ -495,6 +539,10 @@ async fn run_daemon_session(
             }
             DeviceEvent::SetGlobalMute { input_id, muted } => {
                 let mut s = state.lock().await;
+                if s.is_custom_input(input_id) {
+                    // No mute concept for custom inputs — skip
+                    continue;
+                }
                 for &output_id in &s.output_ids() {
                     proxy.set_route_mute(input_id, output_id, muted).await.ok();
                     s.set_route_muted(input_id, output_id, muted);
@@ -521,6 +569,9 @@ async fn refresh_and_notify(
     if let Err(e) = s.refresh_from_dbus(proxy).await {
         warn!("D-Bus refresh failed: {e}");
         return;
+    }
+    if let Err(e) = s.refresh_custom_inputs(proxy).await {
+        warn!("custom input refresh failed: {e}");
     }
     let snapshot = s.build_snapshot();
     tx.send(DeviceCommand::UpdateState(snapshot)).ok();

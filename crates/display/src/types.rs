@@ -35,6 +35,8 @@ pub struct SlotView {
     pub level: Option<f32>,
     /// App names of audio streams currently assigned to this input.
     pub streams: Vec<String>,
+    /// Whether this slot represents a custom input (single value, no routing).
+    pub is_custom: bool,
 }
 
 #[cfg(test)]
@@ -65,6 +67,7 @@ pub(crate) fn test_display_state() -> DisplayState {
                 global_muted: false,
                 level: None,
                 streams: vec!["Factorio".into(), "Discord".into()],
+                is_custom: false,
             }),
             Some(SlotView {
                 input_id: 2,
@@ -75,6 +78,7 @@ pub(crate) fn test_display_state() -> DisplayState {
                 global_muted: false,
                 level: None,
                 streams: vec![],
+                is_custom: false,
             }),
             Some(SlotView {
                 input_id: 3,
@@ -85,6 +89,7 @@ pub(crate) fn test_display_state() -> DisplayState {
                 global_muted: false,
                 level: None,
                 streams: vec![],
+                is_custom: false,
             }),
             Some(SlotView {
                 input_id: 4,
@@ -95,6 +100,7 @@ pub(crate) fn test_display_state() -> DisplayState {
                 global_muted: true,
                 level: None,
                 streams: vec![],
+                is_custom: false,
             }),
         ],
         page: 0,

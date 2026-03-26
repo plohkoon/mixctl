@@ -1,10 +1,12 @@
 mod audio;
 mod config;
+mod custom_inputs;
 mod dbus_adapter;
 mod service;
 mod shutdown;
 mod state;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -21,6 +23,7 @@ use crate::audio::engine::{
 };
 use crate::audio::volume::combine_pw_volume;
 use crate::config::ConfigFile;
+use crate::custom_inputs::{CustomInputHandler, create_handler};
 use crate::service::{Service, ServiceSignal};
 use crate::state::StateFile;
 
@@ -206,6 +209,43 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Initialize custom input handlers
+    let mut custom_input_handlers: HashMap<u32, Box<dyn CustomInputHandler>> = HashMap::new();
+    let mut custom_input_originals: HashMap<u32, u8> = HashMap::new();
+    for ci in &config.custom_inputs {
+        let id = ci.id();
+        match create_handler(&ci.custom_type, &ci.params) {
+            Ok(handler) => {
+                // Read original value
+                let original = if handler.supports_read() {
+                    match handler.read_current() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("custom input {}: failed to read original: {e}", id);
+                            50
+                        }
+                    }
+                } else {
+                    50
+                };
+                custom_input_originals.insert(id, original);
+
+                // Apply persisted value
+                let persisted = state.custom_input_value(id);
+                if let Err(e) = handler.apply(persisted) {
+                    warn!("custom input {}: failed to apply persisted value {}: {e}", id, persisted);
+                } else {
+                    info!("custom input {} '{}': restored value {} (original {})", id, ci.name, persisted, original);
+                }
+
+                custom_input_handlers.insert(id, handler);
+            }
+            Err(e) => {
+                warn!("custom input {} '{}': failed to create handler: {e}", id, ci.name);
+            }
+        }
+    }
+
     // Relay task: forward commands from tokio mpsc to pipewire channel
     let relay_tx = pw_chan_tx.clone();
     let relay_handle = tokio::spawn(async move {
@@ -221,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceSignal>();
 
-    let svc = Service::new(config, state, pw_cmd_tx.clone(), signal_tx);
+    let svc = Service::new(config, state, pw_cmd_tx.clone(), signal_tx, custom_input_handlers, custom_input_originals);
 
     // Mark state dirty if reconcile made changes
     if reconciled {

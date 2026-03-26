@@ -128,6 +128,7 @@ impl FakeMixer {
                     global_muted,
                     level,
                     streams: vec![],
+                    is_custom: false,
                 });
             }
         }

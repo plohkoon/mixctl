@@ -82,6 +82,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ProfileCmd,
     },
+    /// Manage custom inputs (non-audio dial controls)
+    #[command(name = "custom-input")]
+    CustomInput {
+        #[command(subcommand)]
+        cmd: CustomInputCmd,
+    },
     /// Audio status
     Status,
     /// Manage Beacn hardware device
@@ -413,6 +419,28 @@ enum ComponentCmd {
 enum PlaybackCmd {
     /// List available playback devices
     List,
+}
+
+#[derive(Subcommand)]
+enum CustomInputCmd {
+    /// List all custom inputs
+    List,
+    /// Add a new custom input
+    Add {
+        name: String,
+        color: String,
+        /// Type: display_brightness, keyboard_brightness, dsp_parameter, command, http, dbus
+        custom_type: String,
+        /// Type-specific params as JSON (e.g., '{"command":"brightnessctl set {value}%"}')
+        #[arg(long, default_value = "{}")]
+        params: String,
+    },
+    /// Remove a custom input
+    Remove { id: u32 },
+    /// Get current value (0-100)
+    Get { id: u32 },
+    /// Set value (0-100)
+    Set { id: u32, value: u8 },
 }
 
 #[derive(Subcommand)]
@@ -1002,6 +1030,41 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::CustomInput { cmd } => match cmd {
+            CustomInputCmd::List => {
+                let inputs = proxy.list_custom_inputs().await?;
+                if inputs.is_empty() {
+                    println!("(no custom inputs)");
+                } else {
+                    let id_w = inputs.iter().map(|i| i.id.to_string().len()).max().unwrap_or(1);
+                    let name_w = inputs.iter().map(|i| i.name.len()).max().unwrap_or(1);
+                    let type_w = inputs.iter().map(|i| i.custom_type.len()).max().unwrap_or(1);
+                    for ci in inputs {
+                        println!(
+                            "{:>id_w$}  {:<name_w$}  {:<type_w$}  {}",
+                            ci.id, ci.name, ci.custom_type, ci.value,
+                            id_w = id_w, name_w = name_w, type_w = type_w,
+                        );
+                    }
+                }
+            }
+            CustomInputCmd::Add { name, color, custom_type, params } => {
+                let id = proxy.add_custom_input(&name, &color, &custom_type, &params).await?;
+                println!("ok (id={})", id);
+            }
+            CustomInputCmd::Remove { id } => {
+                proxy.remove_custom_input(id).await?;
+                println!("ok");
+            }
+            CustomInputCmd::Get { id } => {
+                let value = proxy.get_custom_input_value(id).await?;
+                println!("{value}");
+            }
+            CustomInputCmd::Set { id, value } => {
+                proxy.set_custom_input_value(id, value).await?;
+                println!("ok");
+            }
+        },
         Cmd::Listen { cmd } => {
             use futures_lite::StreamExt;
 

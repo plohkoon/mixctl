@@ -51,6 +51,14 @@ export interface ComponentInfo {
   component_type: string;
 }
 
+export interface CustomInputInfo {
+  id: number;
+  name: string;
+  color: string;
+  custom_type: string;
+  value: number;
+}
+
 export interface EqBandInfo {
   band_type: string;
   frequency: number;
