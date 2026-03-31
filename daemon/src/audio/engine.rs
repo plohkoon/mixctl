@@ -210,6 +210,12 @@ fn run_pw_loop(
         known_stream_ids: HashSet::new(),
         known_capture_ids: HashSet::new(),
         known_playback_ids: HashSet::new(),
+        output_target_bindings: config.output_targets.iter()
+            .map(|c| (c.output_id, c.device_name.clone()))
+            .collect(),
+        capture_input_bindings: config.capture_inputs.iter()
+            .map(|c| (c.input_id, c.capture_device_name.clone()))
+            .collect(),
         shutdown: false,
         level_monitoring: config.broadcast_levels,
         level_listeners: HashMap::new(),
@@ -393,6 +399,10 @@ struct PwState {
     known_stream_ids: HashSet<u32>,
     known_capture_ids: HashSet<u32>,
     known_playback_ids: HashSet<u32>,
+    /// Desired output→device bindings (output_id, device_name). Survives device hot-plug.
+    output_target_bindings: Vec<(u32, String)>,
+    /// Desired capture→input bindings (input_id, device_name). Survives device hot-plug.
+    capture_input_bindings: Vec<(u32, String)>,
     shutdown: bool,
     level_monitoring: bool,
     level_listeners: HashMap<u32, Box<dyn std::any::Any>>,
@@ -819,14 +829,27 @@ fn handle_node_global(
                 .or_else(|| props.get("node.nick"))
                 .unwrap_or(node_name)
                 .to_string();
+            let device_name_str = node_name.to_string();
             let mut s = state.borrow_mut();
             s.known_capture_ids.insert(global.id);
-            s.node_name_to_id.insert(node_name.to_string(), global.id);
+            s.node_name_to_id.insert(device_name_str.clone(), global.id);
+            // Re-bind any capture inputs that want this device
+            let rebinds: Vec<u32> = s.capture_input_bindings.iter()
+                .filter(|(_, dev)| *dev == device_name_str)
+                .map(|(id, _)| *id)
+                .collect();
+            for input_id in &rebinds {
+                remove_link_group(&mut s, &format!("capture:{input_id}"));
+            }
             drop(s);
+            for input_id in rebinds {
+                info!("re-binding capture input {input_id} to reappeared device {device_name_str}");
+                queue_capture_links(state, input_id, &device_name_str);
+            }
             event_sender.send(PwEvent::CaptureDeviceAppeared {
                 pw_node_id: global.id,
                 name,
-                device_name: node_name.to_string(),
+                device_name: device_name_str,
             }).ok();
             try_resolve_pending_links(state);
         }
@@ -836,14 +859,27 @@ fn handle_node_global(
                 .or_else(|| props.get("node.nick"))
                 .unwrap_or(node_name)
                 .to_string();
+            let device_name_str = node_name.to_string();
             let mut s = state.borrow_mut();
             s.known_playback_ids.insert(global.id);
-            s.node_name_to_id.insert(node_name.to_string(), global.id);
+            s.node_name_to_id.insert(device_name_str.clone(), global.id);
+            // Re-bind any output targets that want this device
+            let rebinds: Vec<u32> = s.output_target_bindings.iter()
+                .filter(|(_, dev)| *dev == device_name_str)
+                .map(|(id, _)| *id)
+                .collect();
+            for output_id in &rebinds {
+                remove_link_group(&mut s, &format!("output_target:{output_id}"));
+            }
             drop(s);
+            for output_id in rebinds {
+                info!("re-binding output {output_id} to reappeared device {device_name_str}");
+                queue_output_target_links(state, output_id, &device_name_str);
+            }
             event_sender.send(PwEvent::PlaybackDeviceAppeared {
                 pw_node_id: global.id,
                 name,
-                device_name: node_name.to_string(),
+                device_name: device_name_str,
             }).ok();
             try_resolve_pending_links(state);
         }
@@ -1031,7 +1067,13 @@ fn handle_command(
         }
 
         PwCommand::SetOutputTarget { output_id, device_name } => {
-            remove_link_group(&mut state.borrow_mut(), &format!("output_target:{output_id}"));
+            let mut s = state.borrow_mut();
+            remove_link_group(&mut s, &format!("output_target:{output_id}"));
+            s.output_target_bindings.retain(|(id, _)| *id != output_id);
+            if let Some(ref device) = device_name {
+                s.output_target_bindings.push((output_id, device.clone()));
+            }
+            drop(s);
             if let Some(device) = device_name {
                 queue_output_target_links(state, output_id, &device);
                 try_resolve_pending_links(state);
@@ -1057,6 +1099,11 @@ fn handle_command(
         }
 
         PwCommand::BindCaptureToInput { input_id, capture_device_name } => {
+            {
+                let mut s = state.borrow_mut();
+                s.capture_input_bindings.retain(|(id, _)| *id != input_id);
+                s.capture_input_bindings.push((input_id, capture_device_name.clone()));
+            }
             queue_capture_links(state, input_id, &capture_device_name);
             try_resolve_pending_links(state);
         }
@@ -1065,6 +1112,7 @@ fn handle_command(
             let mut s = state.borrow_mut();
             remove_link_group(&mut s, &format!("capture:{input_id}"));
             s.capture_device_names.remove(&input_id);
+            s.capture_input_bindings.retain(|(id, _)| *id != input_id);
         }
 
         PwCommand::SetCaptureVolume { input_id, pw_volume } => {
