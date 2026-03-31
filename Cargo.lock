@@ -2627,6 +2627,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mixctl-adapter-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-lite",
+ "mixctl-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "zbus",
+]
+
+[[package]]
 name = "mixctl-beacn-daemon"
 version = "0.1.0"
 dependencies = [

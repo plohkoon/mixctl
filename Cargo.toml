@@ -8,6 +8,7 @@ members = [
   "crates/protocol",
   "crates/display",
   "crates/device",
+  "crates/adapter-sdk",
   "devices/beacn-daemon",
   "tools/beacn-probe",
   "tools/beacn-test",

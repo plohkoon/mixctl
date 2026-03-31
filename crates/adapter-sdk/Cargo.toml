@@ -1,0 +1,16 @@
+[package]
+name = "mixctl-adapter-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "SDK for building device adapters for mixctl"
+license = "MIT"
+
+[dependencies]
+mixctl-core = { path = "../core" }
+zbus = "5"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+futures-lite = "2"

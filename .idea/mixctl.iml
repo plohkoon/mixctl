@@ -13,6 +13,7 @@
       <sourceFolder url="file://$MODULE_DIR$/apps/tauri/src-tauri/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tools/beacn-probe/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tools/beacn-test/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/adapter-sdk/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
