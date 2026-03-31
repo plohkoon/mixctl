@@ -1,6 +1,6 @@
 use crate::{
     AppRuleInfo, CaptureDeviceInfo, CompressorInfo, ComponentInfo, CustomInputInfo,
-    DeesserInfo, EqBandInfo, GateInfo, InputInfo, LimiterInfo, OutputInfo,
+    DeesserInfo, DeviceInfo, EqBandInfo, GateInfo, InputInfo, LimiterInfo, OutputInfo,
     PlaybackDeviceInfo, RouteInfo, StreamInfo,
 };
 
@@ -83,6 +83,10 @@ pub trait MixCtl {
     // Component tracking
     fn register_component(&self, component_type: &str) -> zbus::Result<()>;
     fn list_components(&self) -> zbus::Result<Vec<ComponentInfo>>;
+
+    // Device adapter registration
+    fn register_device(&self, device_name: &str, capabilities_json: &str) -> zbus::Result<()>;
+    fn list_devices(&self) -> zbus::Result<Vec<DeviceInfo>>;
 
     // DSP: EQ (per input, 8 bands)
     fn set_input_eq_enabled(&self, input_id: u32, enabled: bool) -> zbus::Result<()>;

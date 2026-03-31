@@ -317,8 +317,16 @@ async fn main() -> anyhow::Result<()> {
                 if new_owner.is_empty() {
                     let name = args.name.to_string();
                     let mut shared = cleanup_svc.inner.lock().await;
+                    let mut changed = false;
                     if shared.components.remove(&name).is_some() {
                         info!("component disconnected: {name}");
+                        changed = true;
+                    }
+                    if shared.devices.remove(&name).is_some() {
+                        info!("device adapter disconnected: {name}");
+                        changed = true;
+                    }
+                    if changed {
                         shared.signal_tx.send(ServiceSignal::ComponentChanged).ok();
                     }
                 }

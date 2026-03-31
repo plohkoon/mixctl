@@ -97,9 +97,12 @@ impl AdapterRunner {
         proxy.ping().await?;
         info!("connected to mixer daemon via D-Bus");
 
-        // Register as component (Phase 3 will extend to register_device with capabilities)
+        // Register device with capabilities
         let caps_json = serde_json::to_string(&adapter.capabilities())?;
-        proxy.register_component(adapter.device_name()).await.ok();
+        proxy
+            .register_device(adapter.device_name(), &caps_json)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to register device: {e}"))?;
         info!(
             device = adapter.device_name(),
             capabilities = caps_json,

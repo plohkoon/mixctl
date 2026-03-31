@@ -1,6 +1,6 @@
 use mixctl_core::{
-    AppRuleInfo, CaptureDeviceInfo, ComponentInfo, CustomInputInfo, InputInfo, OutputInfo,
-    PlaybackDeviceInfo, RouteInfo, StreamInfo, parse_hex_color,
+    AppRuleInfo, CaptureDeviceInfo, ComponentInfo, CustomInputInfo, DeviceInfo,
+    InputInfo, OutputInfo, PlaybackDeviceInfo, RouteInfo, StreamInfo, parse_hex_color,
 };
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
@@ -1274,6 +1274,50 @@ impl Service {
             })
             .collect();
         Ok(components)
+    }
+
+    // -- Device adapter registration --
+
+    async fn register_device(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        device_name: &str,
+        capabilities_json: &str,
+    ) -> zbus::fdo::Result<()> {
+        let sender = header
+            .sender()
+            .ok_or_else(|| zbus::fdo::Error::Failed("no sender".into()))?
+            .to_string();
+        // Validate capabilities JSON is parseable
+        let _: serde_json::Value = serde_json::from_str(capabilities_json)
+            .map_err(|e| zbus::fdo::Error::Failed(format!("invalid capabilities JSON: {e}")))?;
+        let mut shared = self.inner.lock().await;
+        shared.devices.insert(
+            sender.clone(),
+            (device_name.to_string(), capabilities_json.to_string()),
+        );
+        // Also register as a component for backward compatibility
+        shared.components.insert(sender.clone(), device_name.to_string());
+        info!("device registered: {device_name} ({sender})");
+        shared.signal_tx.send(ServiceSignal::ComponentChanged).ok();
+        drop(shared);
+        Self::component_changed(&emitter).await.ok();
+        Ok(())
+    }
+
+    async fn list_devices(&self) -> zbus::fdo::Result<Vec<DeviceInfo>> {
+        let shared = self.inner.lock().await;
+        let devices: Vec<DeviceInfo> = shared
+            .devices
+            .iter()
+            .map(|(bus_name, (device_name, capabilities_json))| DeviceInfo {
+                bus_name: bus_name.clone(),
+                device_name: device_name.clone(),
+                capabilities_json: capabilities_json.clone(),
+            })
+            .collect();
+        Ok(devices)
     }
 
     // -- DSP: EQ (per input, 8 bands) --

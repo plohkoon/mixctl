@@ -81,6 +81,8 @@ pub struct Shared {
     pub input_levels: HashMap<u32, f32>,
     /// Registered components: bus_name → component_type
     pub components: HashMap<String, String>,
+    /// Registered device adapters: bus_name → (device_name, capabilities_json)
+    pub devices: HashMap<String, (String, String)>,
     /// Custom input handlers keyed by custom input ID
     pub custom_input_handlers: HashMap<u32, Box<dyn CustomInputHandler>>,
     /// Original values for custom inputs (for restore_on_exit)
@@ -170,6 +172,7 @@ impl Service {
                 original_stream_targets: HashMap::new(),
                 input_levels: HashMap::new(),
                 components: HashMap::new(),
+                devices: HashMap::new(),
                 custom_input_handlers,
                 custom_input_originals,
             })),
@@ -419,6 +422,7 @@ mod tests {
             original_stream_targets: HashMap::new(),
             input_levels: HashMap::new(),
             components: HashMap::new(),
+            devices: HashMap::new(),
             custom_input_handlers: HashMap::new(),
             custom_input_originals: HashMap::new(),
         }

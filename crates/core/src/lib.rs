@@ -64,6 +64,15 @@ pub struct ComponentInfo {
     pub component_type: String,
 }
 
+/// A registered device adapter with its capabilities.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct DeviceInfo {
+    pub bus_name: String,
+    pub device_name: String,
+    /// JSON-serialized capabilities array
+    pub capabilities_json: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct CustomInputInfo {
     pub id: u32,
