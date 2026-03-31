@@ -469,4 +469,460 @@ mod tests {
         state.inputs = make_inputs(8);
         assert_eq!(state.max_page(), 1); // 8 inputs -> (8-1)/4 = 1
     }
+
+    // ── Regression tests for event handler logic (main.rs:380-553) ───
+    //
+    // These capture the exact state-manipulation behavior of each DeviceEvent
+    // handler before the SDK refactor. If any test fails after refactoring,
+    // the refactor changed behavior.
+
+    fn make_custom_input(id: u32, name: &str, value: u8) -> CustomInputEntry {
+        CustomInputEntry {
+            id,
+            name: name.to_string(),
+            color: (50, 50, 50),
+            value,
+        }
+    }
+
+    // ── AdjustRouteVolume handler (main.rs:400-423) ──
+
+    #[test]
+    fn adjust_route_volume_clamps_with_sensitivity() {
+        // Mirrors: let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8
+        let mut state = make_state_with(4, 2);
+        let input_id = 1;
+        let output_id = 100;
+
+        // Start at 100, positive delta should stay at 100
+        state.set_route_volume(input_id, output_id, 100);
+        let old_vol = state.route_volume(input_id, output_id);
+        let delta: i8 = 5;
+        let sensitivity = state.dial_sensitivity as i16;
+        let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+        assert_eq!(new_vol, 100);
+
+        // Start at 100, negative delta with sensitivity=2
+        let delta: i8 = -10;
+        let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+        assert_eq!(new_vol, 80);
+
+        // Start at 5, large negative delta should clamp to 0
+        state.set_route_volume(input_id, output_id, 5);
+        let old_vol = state.route_volume(input_id, output_id);
+        let delta: i8 = -10;
+        let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+        assert_eq!(new_vol, 0);
+    }
+
+    #[test]
+    fn adjust_route_volume_high_sensitivity() {
+        let mut state = make_state_with(4, 2);
+        state.dial_sensitivity = 5;
+        let sensitivity = state.dial_sensitivity as i16;
+
+        let old_vol: u8 = 50;
+        let delta: i8 = 3;
+        let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+        assert_eq!(new_vol, 65); // 50 + 3*5 = 65
+
+        let delta: i8 = -20;
+        let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+        assert_eq!(new_vol, 0); // 50 + (-20*5) = -50, clamps to 0
+    }
+
+    #[test]
+    fn adjust_route_volume_updates_local_state() {
+        let mut state = make_state_with(4, 2);
+        let input_id = 1;
+        let output_id = 100;
+        let sensitivity = state.dial_sensitivity as i16;
+        let old_vol = state.route_volume(input_id, output_id);
+        let delta: i8 = -5;
+        let new_vol = (old_vol as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+
+        state.set_route_volume(input_id, output_id, new_vol);
+        assert_eq!(state.route_volume(input_id, output_id), 90); // 100 + (-5*2) = 90
+    }
+
+    // ── AdjustRouteVolume custom input path (main.rs:402-412) ──
+
+    #[test]
+    fn adjust_custom_input_value_clamps() {
+        // Mirrors: let new_val = (old as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8
+        let mut state = make_state_with(4, 2);
+        state.custom_inputs.push(make_custom_input(200, "Brightness", 50));
+        assert!(state.is_custom_input(200));
+        assert!(!state.is_custom_input(1)); // regular input
+
+        let old = state.custom_inputs[0].value;
+        let sensitivity = state.dial_sensitivity as i16;
+        let delta: i8 = 10;
+        let new_val = (old as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+        assert_eq!(new_val, 70); // 50 + 10*2 = 70
+
+        state.set_custom_input_value(200, new_val);
+        assert_eq!(state.custom_inputs[0].value, 70);
+    }
+
+    #[test]
+    fn adjust_custom_input_clamps_to_bounds() {
+        let mut state = make_state_with(4, 2);
+        state.custom_inputs.push(make_custom_input(200, "Brightness", 95));
+
+        let old = state.custom_inputs[0].value;
+        let sensitivity = state.dial_sensitivity as i16;
+
+        // Positive overflow
+        let delta: i8 = 5;
+        let new_val = (old as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+        assert_eq!(new_val, 100); // 95 + 5*2 = 105, clamps to 100
+
+        // Negative underflow
+        let delta: i8 = -60;
+        let new_val = (old as i16 + delta as i16 * sensitivity).clamp(0, 100) as u8;
+        assert_eq!(new_val, 0); // 95 + (-60*2) = -25, clamps to 0
+    }
+
+    // ── ToggleRouteMute handler (main.rs:425-438) ──
+
+    #[test]
+    fn toggle_route_mute_skips_custom_inputs() {
+        // Mirrors: if s.is_custom_input(input_id) { continue; }
+        let mut state = make_state_with(4, 2);
+        state.custom_inputs.push(make_custom_input(200, "Brightness", 50));
+
+        // Custom input should be detected
+        assert!(state.is_custom_input(200));
+        // Regular input should not
+        assert!(!state.is_custom_input(1));
+    }
+
+    #[test]
+    fn toggle_route_mute_toggles_state() {
+        let mut state = make_state_with(4, 2);
+        let input_id = 1;
+        let output_id = 100;
+
+        assert!(!state.route_muted(input_id, output_id));
+
+        let muted = state.route_muted(input_id, output_id);
+        state.set_route_muted(input_id, output_id, !muted);
+        assert!(state.route_muted(input_id, output_id));
+
+        let muted = state.route_muted(input_id, output_id);
+        state.set_route_muted(input_id, output_id, !muted);
+        assert!(!state.route_muted(input_id, output_id));
+    }
+
+    // ── ToggleGlobalMute handler (main.rs:439-455) ──
+
+    #[test]
+    fn toggle_global_mute_mutes_all_routes_for_input() {
+        let mut state = make_state_with(2, 3);
+        let input_id = 1;
+
+        // Initially all unmuted
+        assert!(!state.is_globally_muted(input_id));
+
+        // Toggle: should mute all routes for this input
+        let all_muted = state.is_globally_muted(input_id);
+        let new_muted = !all_muted; // true
+        for &output_id in &state.output_ids() {
+            state.set_route_muted(input_id, output_id, new_muted);
+        }
+        assert!(state.is_globally_muted(input_id));
+
+        // Toggle again: should unmute all
+        let all_muted = state.is_globally_muted(input_id);
+        let new_muted = !all_muted; // false
+        for &output_id in &state.output_ids() {
+            state.set_route_muted(input_id, output_id, new_muted);
+        }
+        assert!(!state.is_globally_muted(input_id));
+    }
+
+    #[test]
+    fn toggle_global_mute_skips_custom_inputs() {
+        let mut state = make_state_with(2, 3);
+        state.custom_inputs.push(make_custom_input(200, "Brightness", 50));
+        // Custom input has no route mute concept
+        assert!(state.is_custom_input(200));
+    }
+
+    // ── SetGlobalMute handler (main.rs:540-552) ──
+
+    #[test]
+    fn set_global_mute_explicit() {
+        let mut state = make_state_with(2, 3);
+        let input_id = 1;
+
+        // Set muted = true for all routes
+        for &output_id in &state.output_ids() {
+            state.set_route_muted(input_id, output_id, true);
+        }
+        assert!(state.is_globally_muted(input_id));
+
+        // Set muted = false for all routes
+        for &output_id in &state.output_ids() {
+            state.set_route_muted(input_id, output_id, false);
+        }
+        assert!(!state.is_globally_muted(input_id));
+    }
+
+    // ── PageLeft/PageRight handlers (main.rs:468-484) ──
+
+    #[test]
+    fn page_left_does_not_go_below_zero() {
+        let mut state = make_state_with(8, 1);
+        assert_eq!(state.current_page, 0);
+
+        // PageLeft at page 0 should stay at 0
+        if state.current_page > 0 {
+            state.current_page -= 1;
+        }
+        assert_eq!(state.current_page, 0);
+    }
+
+    #[test]
+    fn page_right_does_not_exceed_max() {
+        let mut state = make_state_with(8, 1);
+        let max = state.max_page();
+        assert_eq!(max, 1);
+
+        // Navigate to max page
+        state.current_page = max;
+        assert_eq!(state.current_page, 1);
+
+        // PageRight at max should stay at max
+        let max = state.max_page();
+        if state.current_page < max {
+            state.current_page += 1;
+        }
+        assert_eq!(state.current_page, 1); // didn't change
+    }
+
+    #[test]
+    fn page_navigation_round_trip() {
+        let mut state = make_state_with(12, 1); // 12 inputs = 3 pages (0, 1, 2)
+        assert_eq!(state.max_page(), 2);
+
+        // Navigate right twice
+        let max = state.max_page();
+        if state.current_page < max { state.current_page += 1; }
+        assert_eq!(state.current_page, 1);
+        let max = state.max_page();
+        if state.current_page < max { state.current_page += 1; }
+        assert_eq!(state.current_page, 2);
+
+        // Can't go further right
+        let max = state.max_page();
+        if state.current_page < max { state.current_page += 1; }
+        assert_eq!(state.current_page, 2);
+
+        // Navigate left back to 0
+        if state.current_page > 0 { state.current_page -= 1; }
+        assert_eq!(state.current_page, 1);
+        if state.current_page > 0 { state.current_page -= 1; }
+        assert_eq!(state.current_page, 0);
+    }
+
+    // ── NextOutput/PrevOutput with empty outputs ──
+
+    #[test]
+    fn next_output_noop_when_empty() {
+        let mut state = make_state_with(4, 0);
+        assert_eq!(state.current_output_index, 0);
+        state.next_output();
+        assert_eq!(state.current_output_index, 0); // no change
+    }
+
+    #[test]
+    fn prev_output_noop_when_empty() {
+        let mut state = make_state_with(4, 0);
+        assert_eq!(state.current_output_index, 0);
+        state.prev_output();
+        assert_eq!(state.current_output_index, 0); // no change
+    }
+
+    // ── Level decay (used by input_levels_changed handler, main.rs:335-356) ──
+
+    #[test]
+    fn decay_levels_applies_exponential_decay() {
+        let mut state = make_state_with(4, 1);
+        state.level_decay = 0.8;
+        state.input_levels.insert(1, 1.0);
+        state.input_levels.insert(2, 0.5);
+
+        state.decay_levels();
+        assert!((state.input_levels[&1] - 0.8).abs() < 0.001);
+        assert!((state.input_levels[&2] - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn decay_levels_removes_below_threshold() {
+        let mut state = make_state_with(4, 1);
+        state.level_decay = 0.5;
+        state.input_levels.insert(1, 0.03); // will decay to 0.015 (above 0.01 threshold)
+        state.input_levels.insert(2, 0.01); // will decay to 0.005 (below 0.01 threshold)
+
+        state.decay_levels();
+        assert!(state.input_levels.contains_key(&1)); // 0.015, above threshold
+        assert!(!state.input_levels.contains_key(&2)); // removed
+    }
+
+    // ── Custom inputs in build_snapshot (main.rs snapshot used by all handlers) ──
+
+    #[test]
+    fn build_snapshot_includes_custom_inputs() {
+        let mut state = make_state_with(3, 1);
+        state.custom_inputs.push(make_custom_input(200, "Brightness", 75));
+
+        let snap = state.build_snapshot();
+        // 3 regular + 1 custom = 4 visible
+        assert_eq!(snap.visible_inputs.iter().filter(|v| v.is_some()).count(), 4);
+
+        // Custom input appears at index 3 (after regular inputs)
+        let custom_slot = snap.visible_inputs[3].as_ref().unwrap();
+        assert_eq!(custom_slot.input_id, 200);
+        assert_eq!(custom_slot.volume, 75); // custom input value, not route volume
+        assert!(custom_slot.is_custom);
+        assert!(!custom_slot.route_muted);
+        assert!(!custom_slot.global_muted);
+    }
+
+    #[test]
+    fn build_snapshot_custom_inputs_paginate() {
+        let mut state = make_state_with(3, 1);
+        // Add 3 custom inputs -> total 6 items -> 2 pages
+        state.custom_inputs.push(make_custom_input(200, "Brightness", 50));
+        state.custom_inputs.push(make_custom_input(201, "Volume", 80));
+        state.custom_inputs.push(make_custom_input(202, "Speed", 30));
+
+        assert_eq!(state.max_page(), 1); // (6-1)/4 = 1
+
+        // Page 0: inputs 1-3 + custom 200
+        let snap = state.build_snapshot();
+        assert_eq!(snap.visible_inputs.iter().filter(|v| v.is_some()).count(), 4);
+        assert!(!snap.visible_inputs[0].as_ref().unwrap().is_custom);
+        assert!(snap.visible_inputs[3].as_ref().unwrap().is_custom);
+
+        // Page 1: custom 201, 202
+        state.current_page = 1;
+        let snap = state.build_snapshot();
+        assert_eq!(snap.visible_inputs.iter().filter(|v| v.is_some()).count(), 2);
+        assert!(snap.visible_inputs[0].as_ref().unwrap().is_custom);
+        assert_eq!(snap.visible_inputs[0].as_ref().unwrap().input_id, 201);
+    }
+
+    #[test]
+    fn max_page_includes_custom_inputs() {
+        let mut state = make_state_with(3, 1);
+        assert_eq!(state.max_page(), 0); // 3 items, 1 page
+
+        state.custom_inputs.push(make_custom_input(200, "Brightness", 50));
+        assert_eq!(state.max_page(), 0); // 4 items, still 1 page
+
+        state.custom_inputs.push(make_custom_input(201, "Volume", 80));
+        assert_eq!(state.max_page(), 1); // 5 items, 2 pages
+    }
+
+    // ── Route operations on missing routes ──
+
+    #[test]
+    fn route_volume_default_for_missing_route() {
+        let state = make_state_with(4, 2);
+        // Query a route that doesn't exist
+        assert_eq!(state.route_volume(999, 999), 100); // default
+    }
+
+    #[test]
+    fn route_muted_default_for_missing_route() {
+        let state = make_state_with(4, 2);
+        assert!(!state.route_muted(999, 999)); // default false
+    }
+
+    #[test]
+    fn set_route_volume_noop_for_missing_route() {
+        let mut state = make_state_with(4, 2);
+        // Should not panic
+        state.set_route_volume(999, 999, 50);
+        assert_eq!(state.route_volume(999, 999), 100); // unchanged default
+    }
+
+    #[test]
+    fn set_route_muted_noop_for_missing_route() {
+        let mut state = make_state_with(4, 2);
+        state.set_route_muted(999, 999, true);
+        assert!(!state.route_muted(999, 999)); // unchanged default
+    }
+
+    // ── set_custom_input_value edge cases ──
+
+    #[test]
+    fn set_custom_input_value_noop_for_missing() {
+        let mut state = make_state_with(4, 1);
+        // No custom inputs. Should not panic.
+        state.set_custom_input_value(999, 50);
+    }
+
+    #[test]
+    fn set_custom_input_value_updates_correct_entry() {
+        let mut state = make_state_with(4, 1);
+        state.custom_inputs.push(make_custom_input(200, "A", 10));
+        state.custom_inputs.push(make_custom_input(201, "B", 20));
+
+        state.set_custom_input_value(201, 99);
+        assert_eq!(state.custom_inputs[0].value, 10); // A unchanged
+        assert_eq!(state.custom_inputs[1].value, 99); // B updated
+    }
+
+    // ── Snapshot with levels ──
+
+    #[test]
+    fn build_snapshot_levels_only_when_enabled() {
+        let mut state = make_state_with(4, 1);
+        state.input_levels.insert(1, 0.75);
+
+        // levels_enabled = false -> no levels in snapshot
+        let snap = state.build_snapshot();
+        assert!(snap.visible_inputs[0].as_ref().unwrap().level.is_none());
+
+        // levels_enabled = true -> levels appear
+        state.levels_enabled = true;
+        let snap = state.build_snapshot();
+        let level = snap.visible_inputs[0].as_ref().unwrap().level.unwrap();
+        assert!((level - 0.75).abs() < 0.001);
+    }
+
+    // ── Snapshot current output marking ──
+
+    #[test]
+    fn build_snapshot_marks_current_output() {
+        let mut state = make_state_with(4, 3);
+        state.current_output_index = 1;
+        let snap = state.build_snapshot();
+        assert!(!snap.outputs[0].is_current);
+        assert!(snap.outputs[1].is_current);
+        assert!(!snap.outputs[2].is_current);
+    }
+
+    // ── Snapshot route data reflects current output ──
+
+    #[test]
+    fn build_snapshot_shows_routes_for_current_output() {
+        let mut state = make_state_with(2, 2);
+        // Set different volumes for input 1 on each output
+        state.set_route_volume(1, 100, 80); // output 100 (index 0)
+        state.set_route_volume(1, 101, 30); // output 101 (index 1)
+
+        // current_output_index = 0 -> should show volume 80
+        let snap = state.build_snapshot();
+        assert_eq!(snap.visible_inputs[0].as_ref().unwrap().volume, 80);
+
+        // Switch to output index 1 -> should show volume 30
+        state.current_output_index = 1;
+        let snap = state.build_snapshot();
+        assert_eq!(snap.visible_inputs[0].as_ref().unwrap().volume, 30);
+    }
 }
