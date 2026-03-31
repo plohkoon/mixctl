@@ -12,5 +12,6 @@ members = [
   "devices/beacn-daemon",
   "tools/beacn-probe",
   "tools/beacn-test",
+  "tools/fake-device",
   "apps/tui",
 ]

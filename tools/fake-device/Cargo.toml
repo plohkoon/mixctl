@@ -1,0 +1,19 @@
+[package]
+name = "mixctl-fake-device"
+version = "0.1.0"
+edition = "2024"
+description = "Fake device adapter for testing the mixctl adapter SDK"
+
+[[bin]]
+name = "mixctl-fake-device"
+path = "src/main.rs"
+
+[dependencies]
+mixctl-adapter-sdk = { path = "../../crates/adapter-sdk" }
+mixctl-core = { path = "../../crates/core" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+rand = "0.9"
