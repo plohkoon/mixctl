@@ -1,0 +1,14 @@
+[Unit]
+Description=MixCtl {{device_name}} Device Daemon
+Documentation=https://github.com/plohkoon/mixctl
+After=mixctl-daemon.service
+Wants=mixctl-daemon.service
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/mixctl-{{device_name}}-daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

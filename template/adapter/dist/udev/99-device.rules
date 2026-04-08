@@ -1,0 +1,11 @@
+# {{device_name}} - grant user access without root
+# Replace XXXX with your device's USB vendor ID
+# Install: sudo cp 99-device.rules /etc/udev/rules.d/
+# Reload: sudo udevadm control --reload-rules && sudo udevadm trigger
+{% if usb_vendor_id != "" %}
+SUBSYSTEM=="usb", ATTR{idVendor}=="{{usb_vendor_id}}", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="{{usb_vendor_id}}", TAG+="uaccess"
+{% else %}
+# SUBSYSTEM=="usb", ATTR{idVendor}=="XXXX", TAG+="uaccess"
+# SUBSYSTEM=="hidraw", ATTRS{idVendor}=="XXXX", TAG+="uaccess"
+{% endif %}

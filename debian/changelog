@@ -1,0 +1,9 @@
+mixctl (0.1.0-1) unstable; urgency=medium
+
+  * Initial release
+  * PipeWire-based mixer daemon with input/output matrix routing
+  * CLI, TUI interfaces
+  * Device adapter SDK for hardware controllers
+  * Beacn Mix Create device adapter
+
+ -- Gregory Huber <greghuber@users.noreply.github.com>  Mon, 31 Mar 2026 00:00:00 +0000

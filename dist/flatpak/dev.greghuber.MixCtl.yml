@@ -1,0 +1,33 @@
+app-id: dev.greghuber.MixCtl
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+
+command: mixctl-daemon
+
+finish-args:
+  # D-Bus session bus (required for daemon communication)
+  - --socket=session-bus
+  # PipeWire access (audio routing)
+  - --filesystem=xdg-run/pipewire-0
+  # USB device access (for hardware adapters)
+  - --device=all
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/mixctl/cargo
+
+modules:
+  - name: mixctl
+    buildsystem: simple
+    build-commands:
+      - cargo build --release -p mixctl-daemon -p mixctl-cli -p mixctl-tui
+      - install -Dm755 target/release/mixctl-daemon /app/bin/mixctl-daemon
+      - install -Dm755 target/release/mixctl-cli /app/bin/mixctl-cli
+      - install -Dm755 target/release/mixctl-tui /app/bin/mixctl-tui
+    sources:
+      - type: dir
+        path: ../..

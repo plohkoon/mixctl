@@ -1,0 +1,35 @@
+# Maintainer: Gregory Huber <greghuber@users.noreply.github.com>
+pkgname=mixctl-beacn
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Beacn Mix Create device adapter for mixctl"
+arch=('x86_64' 'aarch64')
+url="https://github.com/plohkoon/mixctl"
+license=('MIT')
+depends=('mixctl')
+makedepends=('rust' 'cargo' 'clang')
+source=("mixctl-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "mixctl-$pkgver"
+    cargo build --release -p mixctl-beacn-daemon
+}
+
+package() {
+    cd "mixctl-$pkgver"
+
+    # Binary
+    install -Dm755 "target/release/mixctl-beacn-daemon" "$pkgdir/usr/bin/mixctl-beacn-daemon"
+
+    # Systemd user service
+    install -Dm644 "dist/systemd/mixctl-beacn-daemon.service" \
+        "$pkgdir/usr/lib/systemd/user/mixctl-beacn-daemon.service"
+
+    # udev rules
+    install -Dm644 "dist/udev/99-beacn-mix.rules" \
+        "$pkgdir/usr/lib/udev/rules.d/99-beacn-mix.rules"
+
+    # License
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

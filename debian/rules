@@ -1,0 +1,29 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release \
+		-p mixctl-daemon \
+		-p mixctl-cli \
+		-p mixctl-tui \
+		-p mixctl-beacn-daemon
+
+override_dh_auto_install:
+	# mixctl package
+	install -Dm755 target/release/mixctl-daemon debian/mixctl/usr/bin/mixctl-daemon
+	install -Dm755 target/release/mixctl-cli debian/mixctl/usr/bin/mixctl-cli
+	install -Dm755 target/release/mixctl-tui debian/mixctl/usr/bin/mixctl-tui
+	install -Dm644 dist/systemd/mixctl-daemon.service \
+		debian/mixctl/usr/lib/systemd/user/mixctl-daemon.service
+
+	# mixctl-beacn package
+	install -Dm755 target/release/mixctl-beacn-daemon debian/mixctl-beacn/usr/bin/mixctl-beacn-daemon
+	install -Dm644 dist/systemd/mixctl-beacn-daemon.service \
+		debian/mixctl-beacn/usr/lib/systemd/user/mixctl-beacn-daemon.service
+	install -Dm644 dist/udev/99-beacn-mix.rules \
+		debian/mixctl-beacn/usr/lib/udev/rules.d/99-beacn-mix.rules
+
+override_dh_auto_test:
+	cargo test

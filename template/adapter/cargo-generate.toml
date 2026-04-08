@@ -1,0 +1,21 @@
+[template]
+cargo_generate_version = ">=0.18.0"
+
+[placeholders.device_name]
+type = "string"
+prompt = "Device name (e.g. goxlr-mini, elgato-wave)?"
+
+[placeholders.usb_vendor_id]
+type = "string"
+prompt = "USB vendor ID (hex, e.g. 1fc9)? Leave blank if not USB."
+default = ""
+
+[placeholders.fader_count]
+type = "string"
+prompt = "Number of faders/dials?"
+default = "4"
+
+[placeholders.button_count]
+type = "string"
+prompt = "Number of buttons?"
+default = "8"

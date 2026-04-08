@@ -1,0 +1,22 @@
+Source: mixctl
+Section: sound
+Priority: optional
+Maintainer: Gregory Huber <greghuber@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13), cargo, rustc, libpipewire-0.3-dev, libclang-dev, pkg-config
+Standards-Version: 4.6.0
+Homepage: https://github.com/plohkoon/mixctl
+
+Package: mixctl
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, pipewire
+Description: Linux userspace controller for USB audio mixers
+ mixctl manages audio routing through PipeWire with an input/output matrix
+ model, a CLI, TUI, and desktop UI. Device adapters connect hardware
+ controllers (Beacn Mix, GoXLR, MIDI controllers, etc.) via a plugin SDK.
+
+Package: mixctl-beacn
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, mixctl
+Description: Beacn Mix Create device adapter for mixctl
+ Device adapter connecting the Beacn Mix Create USB audio mixer hardware
+ (4 dials, 11 buttons, 800x480 LCD, RGB LEDs) to the mixctl daemon.

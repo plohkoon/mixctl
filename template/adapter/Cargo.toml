@@ -1,0 +1,18 @@
+[package]
+name = "mixctl-{{device_name}}-daemon"
+version = "0.1.0"
+edition = "2024"
+description = "mixctl device adapter for {{device_name}}"
+license = "MIT"
+
+[[bin]]
+name = "mixctl-{{device_name}}-daemon"
+path = "src/main.rs"
+
+[dependencies]
+mixctl-adapter-sdk = { git = "https://github.com/plohkoon/mixctl" }
+mixctl-core = { git = "https://github.com/plohkoon/mixctl" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

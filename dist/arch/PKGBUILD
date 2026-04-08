@@ -1,0 +1,39 @@
+# Maintainer: Gregory Huber <greghuber@users.noreply.github.com>
+pkgname=mixctl
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Linux userspace controller for USB audio mixers with PipeWire routing"
+arch=('x86_64' 'aarch64')
+url="https://github.com/plohkoon/mixctl"
+license=('MIT')
+depends=('pipewire' 'dbus')
+makedepends=('rust' 'cargo' 'pipewire' 'clang')
+optdepends=(
+    'mixctl-beacn: Beacn Mix Create hardware support'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    cargo build --release \
+        -p mixctl-daemon \
+        -p mixctl-cli \
+        -p mixctl-tui
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    # Binaries
+    install -Dm755 "target/release/mixctl-daemon" "$pkgdir/usr/bin/mixctl-daemon"
+    install -Dm755 "target/release/mixctl-cli" "$pkgdir/usr/bin/mixctl-cli"
+    install -Dm755 "target/release/mixctl-tui" "$pkgdir/usr/bin/mixctl-tui"
+
+    # Systemd user service
+    install -Dm644 "dist/systemd/mixctl-daemon.service" \
+        "$pkgdir/usr/lib/systemd/user/mixctl-daemon.service"
+
+    # License
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
