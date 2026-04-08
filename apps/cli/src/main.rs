@@ -12,6 +12,41 @@ fn parse_bool(s: &str) -> Result<bool, String> {
     }
 }
 
+/// Parse capabilities JSON into a human-readable summary line.
+fn summarize_capabilities(json: &str) -> String {
+    let caps: Vec<serde_json::Value> = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return "(invalid capabilities)".to_string(),
+    };
+    let mut parts = Vec::new();
+    for cap in &caps {
+        if let Some(obj) = cap.as_object() {
+            if let Some(fader) = obj.get("Fader") {
+                let count = fader.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                parts.push(format!("{count} faders"));
+            } else if let Some(button) = obj.get("Button") {
+                let count = button.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                parts.push(format!("{count} buttons"));
+            } else if let Some(screen) = obj.get("Screen") {
+                let w = screen.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+                let h = screen.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                parts.push(format!("screen ({w}x{h})"));
+            } else if let Some(led) = obj.get("Led") {
+                let count = led.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                parts.push(format!("{count} LEDs"));
+            } else if let Some(meter) = obj.get("Meter") {
+                let count = meter.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                parts.push(format!("{count} meters"));
+            }
+        }
+    }
+    if parts.is_empty() {
+        "(no capabilities)".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
@@ -87,6 +122,11 @@ enum Cmd {
     CustomInput {
         #[command(subcommand)]
         cmd: CustomInputCmd,
+    },
+    /// Device adapter management
+    Adapter {
+        #[command(subcommand)]
+        cmd: AdapterCmd,
     },
     /// Audio status
     Status,
@@ -412,6 +452,12 @@ enum LevelCmd {
 #[derive(Subcommand)]
 enum ComponentCmd {
     /// List connected components
+    List,
+}
+
+#[derive(Subcommand)]
+enum AdapterCmd {
+    /// List connected device adapters with their capabilities
     List,
 }
 
@@ -928,6 +974,20 @@ async fn main() -> Result<()> {
                 } else {
                     for c in components {
                         println!("{} ({})", c.component_type, c.bus_name);
+                    }
+                }
+            }
+        },
+        Cmd::Adapter { cmd } => match cmd {
+            AdapterCmd::List => {
+                let devices = proxy.list_devices().await?;
+                if devices.is_empty() {
+                    println!("(no device adapters connected)");
+                } else {
+                    for d in devices {
+                        // Parse capabilities for a readable summary
+                        let caps_summary = summarize_capabilities(&d.capabilities_json);
+                        println!("{:<18} {}", d.device_name, caps_summary);
                     }
                 }
             }
