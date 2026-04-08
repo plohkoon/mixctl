@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 mixctl-core = { path = "../../crates/core" }
+mixctl-adapter-sdk = { path = "../../crates/adapter-sdk" }
 mixctl-beacn-device = { path = "../../crates/device" }
 mixctl-beacn-display = { path = "../../crates/display" }
 serde = { version = "1", features = ["derive"] }
