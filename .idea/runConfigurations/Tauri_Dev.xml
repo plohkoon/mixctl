@@ -1,0 +1,7 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Tauri Dev" type="CompoundRunConfigurationType">
+    <toRun name="Vite Dev Server" type="js.build_tools.npm" />
+    <toRun name="Tauri UI" type="CargoCommandRunConfiguration" />
+    <method v="2" />
+  </configuration>
+</component>
