@@ -215,7 +215,7 @@ fn spawn_component_changed(
             let state = app.state::<Mutex<AppState>>();
             let s = state.lock().await;
             if let Ok(components) = s.proxy.as_ref().unwrap().list_components().await {
-                let beacn = components.iter().any(|c| c.component_type == "beacn");
+                let beacn = components.iter().any(|c| c.component_type.starts_with("beacn"));
                 app.emit("mixer:beacn-changed", beacn).ok();
             }
         }
@@ -332,7 +332,7 @@ async fn emit_full_refresh(app: &AppHandle) {
         default_input_id,
         default_output_id,
         audio_connected: audio_status == "connected",
-        beacn_connected: components.iter().any(|c| c.component_type == "beacn"),
+        beacn_connected: components.iter().any(|c| c.component_type.starts_with("beacn")),
     };
 
     app.emit("mixer:full-refresh", &full).ok();

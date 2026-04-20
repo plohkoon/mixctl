@@ -61,7 +61,7 @@ pub async fn get_full_state(state: State<'_, Mutex<AppState>>) -> Result<FullSta
         default_input_id,
         default_output_id,
         audio_connected: audio_status == "connected",
-        beacn_connected: components.iter().any(|c| c.component_type == "beacn"),
+        beacn_connected: components.iter().any(|c| c.component_type.starts_with("beacn")),
     })
 }
 

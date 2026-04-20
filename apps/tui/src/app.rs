@@ -248,7 +248,7 @@ impl AppState {
         profiles: Vec<String>,
         custom_inputs: Vec<CustomInputInfo>,
     ) -> Self {
-        let beacn_connected = components.iter().any(|c| c.component_type == "beacn");
+        let beacn_connected = components.iter().any(|c| c.component_type.starts_with("beacn"));
         Self {
             inputs,
             outputs,
@@ -391,7 +391,7 @@ impl AppState {
             DaemonSignal::CaptureDevicesRefreshed(devices) => self.capture_devices = devices,
             DaemonSignal::PlaybackDevicesRefreshed(devices) => self.playback_devices = devices,
             DaemonSignal::ComponentsRefreshed(components) => {
-                self.beacn_connected = components.iter().any(|c| c.component_type == "beacn");
+                self.beacn_connected = components.iter().any(|c| c.component_type.starts_with("beacn"));
                 self.components = components;
             }
             DaemonSignal::BeacnConfigRefreshed(config) => {
