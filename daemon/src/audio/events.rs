@@ -17,12 +17,12 @@ pub enum PwEvent {
         input_id: u32,
     },
 
-    // -- Phase 2: Output sources + routing --
-    OutputSourceCreated {
+    // -- Phase 2: Output sinks + routing --
+    OutputSinkCreated {
         output_id: u32,
         pw_node_id: u32,
     },
-    OutputSourceDestroyed {
+    OutputSinkDestroyed {
         output_id: u32,
     },
     RouteLinkCreated {
@@ -101,14 +101,14 @@ impl std::fmt::Debug for PwEvent {
                     .field("input_id", input_id)
                     .finish()
             }
-            Self::OutputSourceCreated { output_id, pw_node_id } => {
-                f.debug_struct("OutputSourceCreated")
+            Self::OutputSinkCreated { output_id, pw_node_id } => {
+                f.debug_struct("OutputSinkCreated")
                     .field("output_id", output_id)
                     .field("pw_node_id", pw_node_id)
                     .finish()
             }
-            Self::OutputSourceDestroyed { output_id } => {
-                f.debug_struct("OutputSourceDestroyed")
+            Self::OutputSinkDestroyed { output_id } => {
+                f.debug_struct("OutputSinkDestroyed")
                     .field("output_id", output_id)
                     .finish()
             }

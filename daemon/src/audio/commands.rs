@@ -22,14 +22,14 @@ pub enum PwCommand {
     },
 
     // -- Phase 2: Output sources + routing --
-    CreateOutputSource {
+    CreateOutputSink {
         output_id: u32,
         description: String,
     },
-    DestroyOutputSource {
+    DestroyOutputSink {
         output_id: u32,
     },
-    RenameOutputSource {
+    RenameOutputSink {
         output_id: u32,
         description: String,
     },

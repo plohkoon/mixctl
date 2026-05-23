@@ -33,9 +33,26 @@ Music is muted on Stream and VOD outputs to avoid DMCA issues.
 ## OBS Configuration
 
 1. In OBS, add an **Audio Input Capture** source
-2. Select `mixctl.output.6` (Stream Mix) as the device
-3. For VOD recording, add a second Audio Input Capture with `mixctl.output.7`
+2. Select `Monitor of mixctl.output.6` (Stream Mix) as the device
+3. For VOD recording, add a second Audio Input Capture with `Monitor of mixctl.output.7`
 4. Mute the default desktop audio capture in OBS (mixctl handles routing)
+
+mixctl outputs are PipeWire sinks. Audio is captured from their auto-generated
+`.monitor` source — most recording UIs surface this as "Monitor of <name>".
+If you need to enter the device name manually, use `mixctl.output.6.monitor`.
+
+## Sunshine (Moonlight streaming)
+
+Sunshine reads audio from `<audio_sink>.monitor`, so point it at the bare sink
+name:
+
+```ini
+# ~/.config/sunshine/sunshine.conf
+audio_sink = mixctl.output.6
+```
+
+Sunshine will internally capture from `mixctl.output.6.monitor`. Restart
+Sunshine after editing the config.
 
 ## Discord Setup
 

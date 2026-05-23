@@ -161,7 +161,7 @@ Created via `Core::create_object::<Node>("adapter", &props)` with `factory.name 
 | Purpose | `node.name` | `media.class` | Notes |
 |---|---|---|---|
 | Input sink | `mixctl.input.{id}` | `Audio/Sink` | Apps play audio into this |
-| Output source | `mixctl.output.{id}` | `Audio/Source/Virtual` | Apps capture from this |
+| Output sink | `mixctl.output.{id}` | `Audio/Sink` | Mixer writes the post-mix here; apps capture from the auto-generated `mixctl.output.{id}.monitor` source |
 
 All virtual nodes use 8-channel (7.1) layout: `FL,FR,FC,LFE,RL,RR,SL,SR`. PipeWire handles channel adaptation automatically — stereo apps use FL/FR, surround apps use all 8.
 
@@ -241,9 +241,9 @@ Monitors registry for `media.class = "Audio/Source"` nodes (excluding `mixctl.*`
 | `DestroyInputSink { input_id }` | Destroy virtual sink + route/capture loopbacks |
 | `SetDefaultInput { input_id }` | Set PipeWire default sink |
 | `RenameInputSink { input_id, description }` | Recreate sink with new name |
-| `CreateOutputSource { output_id, description }` | Create virtual source |
-| `DestroyOutputSource { output_id }` | Destroy source + all routes |
-| `RenameOutputSource { output_id, description }` | Recreate source with new name |
+| `CreateOutputSink { output_id, description }` | Create virtual sink (with auto-paired `.monitor` source) |
+| `DestroyOutputSink { output_id }` | Destroy sink + all routes |
+| `RenameOutputSink { output_id, description }` | Recreate sink with new name |
 | `SetRouteLink { input_id, output_id, volume: f32 }` | Create/update route loopback (combined volume) |
 | `DestroyRouteLink { input_id, output_id }` | Remove route loopback |
 | `SetOutputTarget { output_id, device_name }` | Link output to physical device |
@@ -269,8 +269,8 @@ When `broadcast_levels` is enabled (`set_broadcast_levels(true)`), the PipeWire 
 | `ChannelReady { sender }` | PW thread created new channel after (re)connect |
 | `InputSinkCreated { input_id, pw_node_id }` | Sink ready |
 | `InputSinkDestroyed { input_id }` | Sink removed |
-| `OutputSourceCreated { output_id, pw_node_id }` | Source ready |
-| `OutputSourceDestroyed { output_id }` | Source removed |
+| `OutputSinkCreated { output_id, pw_node_id }` | Sink ready (paired `.monitor` source auto-created) |
+| `OutputSinkDestroyed { output_id }` | Sink removed |
 | `RouteLinkCreated { input_id, output_id }` | Loopback ready |
 | `StreamAppeared { pw_node_id, app_name, media_name }` | App started playing |
 | `StreamRemoved { pw_node_id }` | App stopped |
@@ -303,7 +303,7 @@ ShutdownGuard::drop()
   │       ├─ Restore default.audio.sink to pre-daemon value
   │       ├─ Restore/clear target.node for each known stream
   │       ├─ Destroy capture/route/output-target loopbacks
-  │       ├─ Drop input sinks + output sources
+  │       ├─ Drop input + output sinks
   │       └─ main_loop.quit()
   │
   ├─ Abort tokio tasks

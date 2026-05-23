@@ -21,7 +21,7 @@ Apps (Spotify, Discord, Games)
          │
 ┌─────────────────┐
 │ Output Channels  │  "Personal Mix", "Stream Mix", "VOD Track"
-│ (virtual sources)│  Each goes to a hardware device
+│ (virtual sinks)  │  Each has a paired .monitor source; routed to hardware
 └────────┬────────┘
          │
          ▼
@@ -30,7 +30,7 @@ Apps (Spotify, Discord, Games)
 
 **Key concepts:**
 - **Input** = a virtual sink that receives audio from apps
-- **Output** = a virtual source that sends mixed audio to hardware
+- **Output** = a virtual sink that receives the post-mix; its `.monitor` source feeds hardware and any recording/streaming app
 - **Route** = the volume/mute setting for a specific input→output pair
 - **App Rule** = auto-assigns apps to inputs (e.g., "spotify" → Music channel)
 

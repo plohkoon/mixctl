@@ -184,7 +184,7 @@ fn run_pw_loop(
         core: Some(core.clone()),
         input_sinks: HashMap::new(),
         input_sink_pw_ids: HashMap::new(),
-        output_sources: HashMap::new(),
+        output_sinks: HashMap::new(),
         mixer: mixer,
         volume_matrix,
         input_id_to_idx: HashMap::new(),
@@ -295,7 +295,7 @@ fn run_pw_loop(
         create_input_sink(&state, &event_sender, &core, cfg.input_id, &cfg.description);
     }
     for cfg in &config.outputs {
-        create_output_source(&state, &event_sender, &core, cfg.output_id, &cfg.description);
+        create_output_sink(&state, &event_sender, &core, cfg.output_id, &cfg.description);
     }
 
     // Connect the mixer filter
@@ -365,7 +365,7 @@ struct PwState {
     core: Option<CoreRc>,
     input_sinks: HashMap<u32, PwNodeState>,
     input_sink_pw_ids: HashMap<u32, u32>,
-    output_sources: HashMap<u32, PwNodeState>,
+    output_sinks: HashMap<u32, PwNodeState>,
     mixer: Option<MixerFilter>,
     volume_matrix: Arc<VolumeMatrix>,
     input_id_to_idx: HashMap<u32, usize>,
@@ -649,7 +649,7 @@ fn queue_filter_to_output_links(state: &Rc<RefCell<PwState>>, output_ids: &[u32]
                 out_node_name: "mixctl.mixer".to_string(),
                 out_port_name: format!("out_{output_id}_{ch}"),
                 in_node_name: format!("mixctl.output.{output_id}"),
-                in_port_name: format!("input_{ch}"),
+                in_port_name: format!("playback_{ch}"),
             });
         }
     }
@@ -661,7 +661,7 @@ fn queue_output_target_links(state: &Rc<RefCell<PwState>>, output_id: u32, devic
         s.pending_links.push(PendingLink {
             group: format!("output_target:{output_id}"),
             out_node_name: format!("mixctl.output.{output_id}"),
-            out_port_name: format!("capture_{ch}"),
+            out_port_name: format!("monitor_{ch}"),
             in_node_name: device_name.to_string(),
             in_port_name: format!("playback_{ch}"),
         });
@@ -1034,13 +1034,13 @@ fn handle_command(
             }
         }
 
-        PwCommand::CreateOutputSource { output_id, description } => {
-            create_output_source(state, event_sender, core, output_id, &description);
+        PwCommand::CreateOutputSink { output_id, description } => {
+            create_output_sink(state, event_sender, core, output_id, &description);
             queue_filter_to_output_links(state, &[output_id]);
             try_resolve_pending_links(state);
         }
 
-        PwCommand::DestroyOutputSource { output_id } => {
+        PwCommand::DestroyOutputSink { output_id } => {
             let mut s = state.borrow_mut();
             remove_link_group(&mut s, &format!("filter_to_output:{output_id}"));
             remove_link_group(&mut s, &format!("output_target:{output_id}"));
@@ -1057,18 +1057,18 @@ fn handle_command(
                     if *v > removed_idx { *v -= 1; }
                 }
             }
-            if s.output_sources.remove(&output_id).is_some() {
-                event_sender.send(PwEvent::OutputSourceDestroyed { output_id }).ok();
+            if s.output_sinks.remove(&output_id).is_some() {
+                event_sender.send(PwEvent::OutputSinkDestroyed { output_id }).ok();
             }
         }
 
-        PwCommand::RenameOutputSource { output_id, description } => {
+        PwCommand::RenameOutputSink { output_id, description } => {
             let mut s = state.borrow_mut();
-            let existed = s.output_sources.remove(&output_id).is_some();
+            let existed = s.output_sinks.remove(&output_id).is_some();
             remove_link_group(&mut s, &format!("filter_to_output:{output_id}"));
             drop(s);
             if existed {
-                create_output_source(state, event_sender, core, output_id, &description);
+                create_output_sink(state, event_sender, core, output_id, &description);
                 queue_filter_to_output_links(state, &[output_id]);
                 try_resolve_pending_links(state);
             }
@@ -1334,7 +1334,7 @@ fn cleanup_before_shutdown(
     // to it by now, so removing these links doesn't interrupt its audio.
     s.active_links.clear();
     s.pending_links.clear();
-    s.output_sources.clear();
+    s.output_sinks.clear();
     s.core = None;
     info!("PipeWire cleanup complete");
 }
@@ -1404,7 +1404,7 @@ fn create_input_sink(
     }
 }
 
-fn create_output_source(
+fn create_output_sink(
     state: &Rc<RefCell<PwState>>,
     event_sender: &tokio::sync::mpsc::UnboundedSender<PwEvent>,
     core: &CoreRc,
@@ -1416,7 +1416,7 @@ fn create_output_source(
         "factory.name" => "support.null-audio-sink",
         "node.name" => node_name.clone(),
         "node.description" => description.to_string(),
-        "media.class" => "Audio/Source/Virtual",
+        "media.class" => "Audio/Sink",
         "audio.position" => "FL,FR,FC,LFE,RL,RR,SL,SR",
         "monitor.channel-volumes" => "true",
         "node.autoconnect" => "false",
@@ -1434,7 +1434,7 @@ fn create_output_source(
                     move |info| {
                         if fired.get() { return; }
                         fired.set(true);
-                        ev.send(PwEvent::OutputSourceCreated { output_id, pw_node_id: info.id() }).ok();
+                        ev.send(PwEvent::OutputSinkCreated { output_id, pw_node_id: info.id() }).ok();
                     }
                 })
                 .register();
@@ -1447,14 +1447,14 @@ fn create_output_source(
                 }
             }
 
-            state.borrow_mut().output_sources.insert(output_id, PwNodeState {
+            state.borrow_mut().output_sinks.insert(output_id, PwNodeState {
                 _proxy: proxy,
                 _listener: Box::new(listener),
             });
         }
         Err(e) => {
-            error!("failed to create output source {node_name}: {e}");
-            event_sender.send(PwEvent::Error { message: format!("failed to create output source: {e}") }).ok();
+            error!("failed to create output sink {node_name}: {e}");
+            event_sender.send(PwEvent::Error { message: format!("failed to create output sink: {e}") }).ok();
         }
     }
 }
@@ -1478,7 +1478,7 @@ fn set_default_input(state: &Rc<RefCell<PwState>>, input_id: u32) {
 fn set_default_output(state: &Rc<RefCell<PwState>>, output_id: u32) {
     let s = state.borrow();
     if let Some(metadata) = &s.metadata {
-        let target = format!("mixctl.output.{output_id}");
+        let target = format!("mixctl.output.{output_id}.monitor");
         let value = format!("{{\"name\": \"{target}\"}}");
         metadata.set_property(0, "default.audio.source", Some("Spa:String:JSON"), Some(&value));
     } else {

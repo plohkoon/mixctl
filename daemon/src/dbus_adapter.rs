@@ -345,10 +345,10 @@ impl Service {
         shared.config_dirty = true;
         shared.state_dirty = true;
 
-        // Create PipeWire source
+        // Create PipeWire sink (auto-creates a paired .monitor source)
         Service::send_pw_cmd(
             &shared,
-            PwCommand::CreateOutputSource {
+            PwCommand::CreateOutputSink {
                 output_id: id,
                 description: name.to_string(),
             },
@@ -378,8 +378,8 @@ impl Service {
             .position(|c| c.id() == id)
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("output id {} not found", id)))?;
 
-        // Destroy PipeWire output source (also destroys related route loopbacks)
-        Service::send_pw_cmd(&shared, PwCommand::DestroyOutputSource { output_id: id });
+        // Destroy PipeWire output sink (also destroys related route loopbacks)
+        Service::send_pw_cmd(&shared, PwCommand::DestroyOutputSink { output_id: id });
 
         shared.config.outputs.remove(idx);
         shared.state.remove_output(id);
@@ -444,7 +444,7 @@ impl Service {
 
         Service::send_pw_cmd(
             &shared,
-            PwCommand::RenameOutputSource {
+            PwCommand::RenameOutputSink {
                 output_id: id,
                 description: name.to_string(),
             },

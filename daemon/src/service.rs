@@ -230,14 +230,14 @@ impl Service {
             PwEvent::InputSinkDestroyed { input_id } => {
                 info!("input sink destroyed: input={input_id}");
             }
-            PwEvent::OutputSourceCreated {
+            PwEvent::OutputSinkCreated {
                 output_id,
                 pw_node_id,
             } => {
-                info!("output source created: output={output_id} pw_node={pw_node_id}");
+                info!("output sink created: output={output_id} pw_node={pw_node_id}");
             }
-            PwEvent::OutputSourceDestroyed { output_id } => {
-                info!("output source destroyed: output={output_id}");
+            PwEvent::OutputSinkDestroyed { output_id } => {
+                info!("output sink destroyed: output={output_id}");
             }
             PwEvent::RouteLinkCreated {
                 input_id,
