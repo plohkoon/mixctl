@@ -210,6 +210,7 @@ fn run_pw_loop(
         known_stream_ids: HashSet::new(),
         known_capture_ids: HashSet::new(),
         known_playback_ids: HashSet::new(),
+        client_app_names: HashMap::new(),
         output_target_bindings: config.output_targets.iter()
             .map(|c| (c.output_id, c.device_name.clone()))
             .collect(),
@@ -243,6 +244,8 @@ fn run_pw_loop(
                 }
                 // Clean up node tracking
                 s.node_name_to_id.retain(|_, v| *v != id);
+                // Clean up cached client app names (safe regardless of object type)
+                s.client_app_names.remove(&id);
                 // Clean up stream/device tracking
                 if s.known_stream_ids.remove(&id) {
                     s.active_links.retain(|k, _| !k.starts_with(&format!("stream:{id}:")));
@@ -399,6 +402,10 @@ struct PwState {
     known_stream_ids: HashSet<u32>,
     known_capture_ids: HashSet<u32>,
     known_playback_ids: HashSet<u32>,
+    /// PipeWire client ID → application name. Newer clients (Spotify, Discord)
+    /// only set `application.name` on the Client global, not on the Node,
+    /// so we cache it here and resolve via the stream node's `client.id`.
+    client_app_names: HashMap<u32, String>,
     /// Desired output→device bindings (output_id, device_name). Survives device hot-plug.
     output_target_bindings: Vec<(u32, String)>,
     /// Desired capture→input bindings (input_id, device_name). Survives device hot-plug.
@@ -708,7 +715,27 @@ fn handle_registry_global(
         ObjectType::Metadata => handle_metadata_global(state, event_sender, registry, global),
         ObjectType::Node => handle_node_global(state, event_sender, global),
         ObjectType::Port => handle_port_global(state, global),
+        ObjectType::Client => handle_client_global(state, global),
         _ => {}
+    }
+}
+
+/// Cache the client's friendly name so stream nodes can resolve it via `client.id`.
+/// Many apps (Spotify, Discord, Chromium-based) only set `application.name` here,
+/// not on their stream nodes.
+fn handle_client_global(
+    state: &Rc<RefCell<PwState>>,
+    global: &pw::registry::GlobalObject<&pw::spa::utils::dict::DictRef>,
+) {
+    let props = match &global.props {
+        Some(p) => p,
+        None => return,
+    };
+    let name = props
+        .get("application.name")
+        .or_else(|| props.get("application.process.binary"));
+    if let Some(name) = name {
+        state.borrow_mut().client_app_names.insert(global.id, name.to_string());
     }
 }
 
@@ -805,11 +832,14 @@ fn handle_node_global(
             if effective_name.starts_with("mixctl.") {
                 return;
             }
+            let client_id: Option<u32> = props.get("client.id").and_then(|v| v.parse().ok());
             let app_name = props
                 .get("application.name")
-                .or_else(|| props.get("node.name"))
-                .unwrap_or("unknown")
-                .to_string();
+                .map(str::to_string)
+                .or_else(|| client_id.and_then(|cid| state.borrow().client_app_names.get(&cid).cloned()))
+                .or_else(|| props.get("application.process.binary").map(str::to_string))
+                .or_else(|| props.get("node.name").map(str::to_string))
+                .unwrap_or_else(|| "unknown".into());
             let media_name = props.get("media.name").unwrap_or("").to_string();
             let mut s = state.borrow_mut();
             s.known_stream_ids.insert(global.id);
