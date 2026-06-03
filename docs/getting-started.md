@@ -105,7 +105,7 @@ color = "#F39C12"
 id = 5
 name = "Personal Mix"
 color = "#8E44AD"
-target_device = "alsa_output.usb-Blue_Microphones_Yeti-00.analog-stereo"
+target_devices = ["alsa_output.usb-Blue_Microphones_Yeti-00.analog-stereo"]
 
 [[outputs]]
 id = 6

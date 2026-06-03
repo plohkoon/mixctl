@@ -83,13 +83,12 @@ async fn main() -> anyhow::Result<()> {
     let output_targets: Vec<PwOutputTargetConfig> = config
         .outputs
         .iter()
-        .filter_map(|c| {
-            c.target_device
-                .as_ref()
-                .map(|d| PwOutputTargetConfig {
-                    output_id: c.id(),
-                    device_name: d.clone(),
-                })
+        .flat_map(|c| {
+            let id = c.id();
+            c.target_devices.iter().map(move |d| PwOutputTargetConfig {
+                output_id: id,
+                device_name: d.clone(),
+            })
         })
         .collect();
 

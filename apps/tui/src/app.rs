@@ -615,11 +615,20 @@ impl AppState {
                     let idx = self.settings_cursor - self.inputs.len();
                     if let Some(output) = self.outputs.get(idx) {
                         if !self.playback_devices.is_empty() {
-                            let current_idx = self.playback_devices.iter()
-                                .position(|d| d.device_name == output.target_device)
+                            // Cycle the first bound device through the list; preserve any
+                            // additional bound devices.
+                            let current = output.target_devices.first();
+                            let current_idx = current
+                                .and_then(|name| self.playback_devices.iter().position(|d| &d.device_name == name))
                                 .unwrap_or(0);
                             let next_idx = (current_idx + 1) % self.playback_devices.len();
-                            proxy.set_output_target(output.id, &self.playback_devices[next_idx].device_name).await.ok();
+                            let mut next = output.target_devices.clone();
+                            if next.is_empty() {
+                                next.push(self.playback_devices[next_idx].device_name.clone());
+                            } else {
+                                next[0] = self.playback_devices[next_idx].device_name.clone();
+                            }
+                            proxy.set_output_targets(output.id, next).await.ok();
                         }
                     }
                 }
@@ -744,8 +753,12 @@ impl AppState {
                         // Unbind playback device from any output that targets it
                         if let Some(device) = self.playback_devices.get(self.footer_cursor) {
                             for output in &self.outputs {
-                                if output.target_device == device.device_name {
-                                    proxy.set_output_target(output.id, "").await.ok();
+                                if output.target_devices.iter().any(|d| d == &device.device_name) {
+                                    let next: Vec<String> = output.target_devices.iter()
+                                        .filter(|d| *d != &device.device_name)
+                                        .cloned()
+                                        .collect();
+                                    proxy.set_output_targets(output.id, next).await.ok();
                                 }
                             }
                         }

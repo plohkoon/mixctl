@@ -36,7 +36,7 @@ pub fn run() {
             commands::mixer::set_route_mute,
             commands::mixer::set_output_volume,
             commands::mixer::set_output_mute,
-            commands::mixer::set_output_target,
+            commands::mixer::set_output_targets,
             commands::mixer::list_streams,
             commands::mixer::assign_stream,
             commands::mixer::list_playback_devices,

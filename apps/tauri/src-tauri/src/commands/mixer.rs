@@ -163,13 +163,13 @@ pub async fn set_output_mute(
 }
 
 #[tauri::command]
-pub async fn set_output_target(
+pub async fn set_output_targets(
     state: State<'_, Mutex<AppState>>,
     id: u32,
-    device_name: String,
+    device_names: Vec<String>,
 ) -> Result<(), Error> {
     let s = state.lock().await;
-    Ok(s.proxy()?.set_output_target(id, &device_name).await?)
+    Ok(s.proxy()?.set_output_targets(id, device_names).await?)
 }
 
 #[tauri::command]

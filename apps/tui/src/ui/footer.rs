@@ -202,7 +202,7 @@ fn render_playback_line(frame: &mut Frame, area: Rect, state: &AppState) {
             let bound_output = state
                 .outputs
                 .iter()
-                .find(|o| o.target_device == device.device_name);
+                .find(|o| o.target_devices.iter().any(|d| d == &device.device_name));
 
             spans.push(Span::styled(
                 truncate_inline(&device.name, 12),

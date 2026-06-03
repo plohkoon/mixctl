@@ -97,10 +97,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             Style::default().fg(Color::Gray)
         };
 
-        let target_display = if output.target_device.is_empty() {
+        let target_display = if output.target_devices.is_empty() {
             "(default)".to_string()
         } else {
-            output.target_device.clone()
+            output.target_devices.join(", ")
         };
 
         let line = Line::from(vec![

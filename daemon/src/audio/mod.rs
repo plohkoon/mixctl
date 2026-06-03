@@ -2,6 +2,7 @@ pub mod commands;
 pub mod dsp;
 pub mod engine;
 pub mod events;
+pub mod loopback;
 pub mod mixer;
 pub mod volume;
 

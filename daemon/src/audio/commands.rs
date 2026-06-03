@@ -44,9 +44,9 @@ pub enum PwCommand {
         input_id: u32,
         output_id: u32,
     },
-    SetOutputTarget {
+    SetOutputTargets {
         output_id: u32,
-        device_name: Option<String>,
+        device_names: Vec<String>,
     },
 
     // -- Phase 3: Stream assignment --

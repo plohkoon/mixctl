@@ -156,10 +156,13 @@ export default function FooterBar({
           deviceName: string;
         };
         const output = outputs.find(
-          (o) => o.target_device === data.deviceName,
+          (o) => o.target_devices.includes(data.deviceName),
         );
         if (output) {
-          await MixerApi.setOutputTarget(output.id, "");
+          await MixerApi.setOutputTargets(
+            output.id,
+            output.target_devices.filter((d) => d !== data.deviceName),
+          );
         }
       }
     },
@@ -172,11 +175,15 @@ export default function FooterBar({
       await SystemApi.removeCaptureInput(picking.data.inputId);
       refreshCaptureDevices();
     } else if (picking.type === "playback" && picking.data.deviceName) {
+      const deviceName = picking.data.deviceName;
       const output = outputs.find(
-        (o) => o.target_device === picking.data.deviceName,
+        (o) => o.target_devices.includes(deviceName),
       );
       if (output) {
-        await MixerApi.setOutputTarget(output.id, "");
+        await MixerApi.setOutputTargets(
+          output.id,
+          output.target_devices.filter((d) => d !== deviceName),
+        );
       }
     }
     setPicking(null);
@@ -258,10 +265,10 @@ export default function FooterBar({
 
         {/* Playback device pills — hide unbound devices the user dismissed */}
         {playbackDevices
-          .filter((d) => outputs.some((o) => o.target_device === d.device_name) || !hiddenDevices.has(d.device_name))
+          .filter((d) => outputs.some((o) => o.target_devices.includes(d.device_name)) || !hiddenDevices.has(d.device_name))
           .map((device) => {
           const boundOutput = outputs.find(
-            (o) => o.target_device === device.device_name,
+            (o) => o.target_devices.includes(device.device_name),
           );
           const id = `playback-${device.pw_node_id}`;
           return (

@@ -132,7 +132,7 @@ impl Service {
             id: Some(id),
             name: name.to_string(),
             color: color.to_string(),
-            target_device: None,
+            target_devices: Vec::new(),
             capture_device: None,
         });
         let output_ids: Vec<u32> = shared.config.outputs.iter().map(|o| o.id()).collect();
@@ -334,7 +334,7 @@ impl Service {
             id: Some(id),
             name: name.to_string(),
             color: color.to_string(),
-            target_device: None,
+            target_devices: Vec::new(),
             capture_device: None,
         });
         shared.state.ensure_output(id);
@@ -538,11 +538,11 @@ impl Service {
         Ok(())
     }
 
-    async fn set_output_target(
+    async fn set_output_targets(
         &self,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
         id: u32,
-        device_name: &str,
+        device_names: Vec<String>,
     ) -> zbus::fdo::Result<()> {
         let mut shared = self.inner.lock().await;
         let cfg = shared
@@ -550,19 +550,21 @@ impl Service {
             .find_output_mut(id)
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("output id {} not found", id)))?;
 
-        let device = if device_name.is_empty() {
-            None
-        } else {
-            Some(device_name.to_string())
-        };
-        cfg.target_device = device.clone();
+        // Drop empty entries and de-duplicate while preserving order.
+        let mut devices: Vec<String> = Vec::new();
+        for d in device_names {
+            if !d.is_empty() && !devices.contains(&d) {
+                devices.push(d);
+            }
+        }
+        cfg.target_devices = devices.clone();
         shared.config_dirty = true;
 
         Service::send_pw_cmd(
             &shared,
-            PwCommand::SetOutputTarget {
+            PwCommand::SetOutputTargets {
                 output_id: id,
-                device_name: device,
+                device_names: devices,
             },
         );
 
@@ -893,7 +895,7 @@ impl Service {
             id: Some(id),
             name: name.to_string(),
             color: color.to_string(),
-            target_device: None,
+            target_devices: Vec::new(),
             capture_device: Some(device_state.device_name.clone()),
         });
         let output_ids: Vec<u32> = shared.config.outputs.iter().map(|o| o.id()).collect();
@@ -1004,7 +1006,7 @@ impl Service {
         // Feedback loop detection: check if any output targeted at the same
         // hardware device as this capture would create a mic→speaker→mic loop.
         for output in &shared.config.outputs {
-            if let Some(ref target) = output.target_device {
+            for target in &output.target_devices {
                 // Simple heuristic: if the capture device name and target device
                 // share the same USB device path (e.g., both contain "Yeti"),
                 // warn about potential feedback.

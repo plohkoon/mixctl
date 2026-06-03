@@ -266,8 +266,8 @@ enum OutputCmd {
     SetVolume { id: u32, volume: u8 },
     /// Set an output's mute state (true/false)
     SetMute { id: u32, muted: String },
-    /// Set an output's target hardware device (empty to clear)
-    SetTarget { id: u32, device_name: String },
+    /// Set an output's target hardware devices (pass zero or more device names; pass none to clear)
+    SetTarget { id: u32, device_names: Vec<String> },
     /// Get the default output
     GetDefault,
     /// Set the default output (0 to clear)
@@ -715,11 +715,16 @@ async fn main() -> Result<()> {
             }
             OutputCmd::Get { id } => {
                 let out = proxy.get_output(id).await?;
-                println!("id:     {}", out.id);
-                println!("name:   {}", out.name);
-                println!("color:  {}", out.color);
-                println!("volume: {}", out.volume);
-                println!("muted:  {}", out.muted);
+                println!("id:      {}", out.id);
+                println!("name:    {}", out.name);
+                println!("color:   {}", out.color);
+                println!("volume:  {}", out.volume);
+                println!("muted:   {}", out.muted);
+                if out.target_devices.is_empty() {
+                    println!("targets: (none)");
+                } else {
+                    println!("targets: {}", out.target_devices.join(", "));
+                }
             }
             OutputCmd::Add { name, color, source_output_id } => {
                 let id = proxy.add_output(&name, &color, source_output_id).await?;
@@ -751,8 +756,8 @@ async fn main() -> Result<()> {
                 proxy.set_output_mute(id, muted).await?;
                 println!("ok");
             }
-            OutputCmd::SetTarget { id, device_name } => {
-                proxy.set_output_target(id, &device_name).await?;
+            OutputCmd::SetTarget { id, device_names } => {
+                proxy.set_output_targets(id, device_names).await?;
                 println!("ok");
             }
             OutputCmd::GetDefault => {

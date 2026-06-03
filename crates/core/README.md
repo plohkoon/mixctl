@@ -67,7 +67,7 @@ The `dbus` module defines the `MixCtl` trait with `#[zbus::proxy]`, which genera
 | `set_output_color` | `id, color` | — | Change color |
 | `set_output_volume` | `id, volume` | — | Set master volume (0-100) |
 | `set_output_mute` | `id, muted` | — | Set master mute |
-| `set_output_target` | `id, device_name` | — | Link to physical device |
+| `set_output_targets` | `id, device_names` | — | Link to zero or more physical devices |
 | `get_route` | `input_id, output_id` | `RouteInfo` | Single route |
 | `list_routes_for_output` | `output_id` | `Vec<RouteInfo>` | All routes for an output |
 | `set_route_volume` | `input_id, output_id, volume` | — | Set route volume (0-100) |

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChannelsApi, MixerApi, SystemApi } from "../../lib/api";
 import { useMixerStore } from "../../lib/stores/mixer-store";
 import VolumeFader from "./VolumeFader";
@@ -66,9 +67,16 @@ export default function OutputHeader({ output, index }: OutputHeaderProps) {
     MixerApi.setOutputMute(output.id, !output.muted);
   }, [output.id, output.muted]);
 
-  const handleSelectDevice = useCallback((deviceName: string) => {
-    MixerApi.setOutputTarget(output.id, deviceName);
-    setDeviceDropdownOpen(false);
+  const toggleDevice = useCallback((deviceName: string) => {
+    const current = output.target_devices;
+    const next = current.includes(deviceName)
+      ? current.filter((d) => d !== deviceName)
+      : [...current, deviceName];
+    MixerApi.setOutputTargets(output.id, next);
+  }, [output.id, output.target_devices]);
+
+  const clearDevices = useCallback(() => {
+    MixerApi.setOutputTargets(output.id, []);
   }, [output.id]);
 
   // Drag-and-drop for reordering
@@ -92,12 +100,12 @@ export default function OutputHeader({ output, index }: OutputHeaderProps) {
     e.preventDefault();
     setIsDragOver(false);
 
-    // Handle playback device assignment
+    // Handle playback device assignment — dropping ADDS the device to the bound set
     if (e.dataTransfer.types.includes("application/x-mixctl-playback")) {
       try {
         const data = JSON.parse(e.dataTransfer.getData("application/x-mixctl-playback"));
-        if (data.deviceName) {
-          MixerApi.setOutputTarget(output.id, data.deviceName);
+        if (data.deviceName && !output.target_devices.includes(data.deviceName)) {
+          MixerApi.setOutputTargets(output.id, [...output.target_devices, data.deviceName]);
         }
       } catch { /* ignore */ }
       return;
@@ -112,22 +120,33 @@ export default function OutputHeader({ output, index }: OutputHeaderProps) {
         }
       } catch { /* ignore */ }
     }
-  }, [output.id, index]);
+  }, [output.id, output.target_devices, index]);
 
   const handlePickingClick = useCallback(() => {
     if (picking?.type === "playback" && picking.data.deviceName) {
-      MixerApi.setOutputTarget(output.id, picking.data.deviceName);
+      const name = picking.data.deviceName;
+      if (!output.target_devices.includes(name)) {
+        MixerApi.setOutputTargets(output.id, [...output.target_devices, name]);
+      }
       setPicking(null);
     }
-  }, [picking, output.id, setPicking]);
+  }, [picking, output.id, output.target_devices, setPicking]);
 
   const isPlaybackPicking = picking?.type === "playback";
 
-  const deviceDisplayName = output.target_device
-    ? playbackDevices.find((d) => d.device_name === output.target_device)?.name ?? "Unknown"
-    : "None";
+  const deviceDisplayName = (() => {
+    if (output.target_devices.length === 0) return "None";
+    if (output.target_devices.length === 1) {
+      const dev = playbackDevices.find((d) => d.device_name === output.target_devices[0]);
+      return dev?.name ?? "Unknown";
+    }
+    return `${output.target_devices.length} devices`;
+  })();
 
   const showActions = isHovered || deviceDropdownOpen;
+
+  // Position dropdown via portal so it isn't clipped by overflow-hidden ancestors.
+  const buttonRect = buttonRef.current?.getBoundingClientRect();
 
   return (
     <div
@@ -158,7 +177,7 @@ export default function OutputHeader({ output, index }: OutputHeaderProps) {
             {output.name}
           </span>
           <span className="text-[9px] truncate" style={{ color: "var(--text-muted)" }}>
-            {"\u2192"} {deviceDisplayName}
+            {"→"} {deviceDisplayName}
           </span>
         </div>
 
@@ -169,7 +188,7 @@ export default function OutputHeader({ output, index }: OutputHeaderProps) {
             ref={buttonRef}
             onClick={(e) => { e.stopPropagation(); setDeviceDropdownOpen((v) => !v); }}
             className="w-5 h-5 flex items-center justify-center rounded opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
-            title="Target device"
+            title="Target devices"
           >
             <svg width="11" height="11" viewBox="0 0 16 16" fill="var(--text-secondary)">
               <path d="M14 7h-1.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5H14a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1zM2 7H.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5H2V7zm9-2H5a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zM6 10a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm4 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z" />
@@ -196,40 +215,6 @@ export default function OutputHeader({ output, index }: OutputHeaderProps) {
             </svg>
           </button>
         </div>
-
-        {/* Device dropdown */}
-        {deviceDropdownOpen && (
-          <div
-            ref={dropdownRef}
-            className="absolute top-full right-2 mt-1 z-50 min-w-[160px] max-h-[200px] overflow-y-auto rounded-md py-1"
-            style={{ background: "var(--bg-surface-3)", border: "1px solid var(--border-strong)", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
-          >
-            <button
-              onClick={() => handleSelectDevice("")}
-              className="w-full text-left px-3 py-1.5 text-[11px] cursor-pointer"
-              style={{ color: !output.target_device ? "var(--text-primary)" : "var(--text-secondary)", background: !output.target_device ? "var(--bg-surface-2)" : "transparent" }}
-              onMouseEnter={(e) => { if (output.target_device) e.currentTarget.style.background = "var(--bg-surface-2)"; }}
-              onMouseLeave={(e) => { if (output.target_device) e.currentTarget.style.background = "transparent"; }}
-            >
-              None
-            </button>
-            {playbackDevices.map((device) => {
-              const isSelected = output.target_device === device.device_name;
-              return (
-                <button
-                  key={device.pw_node_id}
-                  onClick={() => handleSelectDevice(device.device_name)}
-                  className="w-full text-left px-3 py-1.5 text-[11px] cursor-pointer truncate"
-                  style={{ color: isSelected ? "var(--text-primary)" : "var(--text-secondary)", background: isSelected ? "var(--bg-surface-2)" : "transparent" }}
-                  onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-surface-2)"; }}
-                  onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}
-                >
-                  {device.name}
-                </button>
-              );
-            })}
-          </div>
-        )}
       </div>
 
       {/* Master volume */}
@@ -241,6 +226,72 @@ export default function OutputHeader({ output, index }: OutputHeaderProps) {
         <MuteButton muted={output.muted} size={24} onClick={handleMute} />
       </div>
 
+      {/* Device dropdown — rendered via portal so overflow-hidden ancestors don't clip it */}
+      {deviceDropdownOpen && buttonRect && createPortal(
+        <div
+          ref={dropdownRef}
+          className="fixed z-[9999] min-w-[180px] max-h-[260px] overflow-y-auto rounded-md py-1"
+          style={{
+            top: buttonRect.bottom + 4,
+            left: Math.max(8, buttonRect.right - 180),
+            background: "var(--bg-surface-3)",
+            border: "1px solid var(--border-strong)",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+          }}
+        >
+          <div className="px-3 py-1 text-[10px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>
+            Bind to devices
+          </div>
+          {playbackDevices.length === 0 && (
+            <div className="px-3 py-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
+              No playback devices
+            </div>
+          )}
+          {playbackDevices.map((device) => {
+            const isSelected = output.target_devices.includes(device.device_name);
+            return (
+              <button
+                key={device.pw_node_id}
+                onClick={() => toggleDevice(device.device_name)}
+                className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-[11px] cursor-pointer"
+                style={{ color: isSelected ? "var(--text-primary)" : "var(--text-secondary)", background: "transparent" }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-surface-2)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+              >
+                <span
+                  className="w-3 h-3 shrink-0 rounded-sm flex items-center justify-center"
+                  style={{
+                    border: `1px solid ${isSelected ? output.color : "var(--border-default)"}`,
+                    background: isSelected ? output.color : "transparent",
+                  }}
+                >
+                  {isSelected && (
+                    <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 8l4 4 7-9" />
+                    </svg>
+                  )}
+                </span>
+                <span className="truncate">{device.name}</span>
+              </button>
+            );
+          })}
+          {output.target_devices.length > 0 && (
+            <>
+              <div className="my-1" style={{ borderTop: "1px solid var(--border-subtle)" }} />
+              <button
+                onClick={() => { clearDevices(); setDeviceDropdownOpen(false); }}
+                className="w-full text-left px-3 py-1.5 text-[11px] cursor-pointer"
+                style={{ color: "var(--text-muted)", background: "transparent" }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-surface-2)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+              >
+                Unbind all
+              </button>
+            </>
+          )}
+        </div>,
+        document.body
+      )}
     </div>
   );
 }

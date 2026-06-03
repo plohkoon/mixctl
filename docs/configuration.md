@@ -30,7 +30,9 @@ color = "#E74C3C"
 id = 5
 name = "Personal Mix"
 color = "#8E44AD"
-target_device = "alsa_output.usb-Blue_Microphones_Yeti-00.analog-stereo"
+# Bind this mix to one or more playback devices — all bound devices receive
+# the same mix in parallel. Use a single name or an array.
+target_devices = ["alsa_output.usb-Blue_Microphones_Yeti-00.analog-stereo"]
 
 [[outputs]]
 id = 6

@@ -39,8 +39,8 @@ export const MixerApi = {
     invoke("set_output_volume", { id, volume }),
   setOutputMute: (id: number, muted: boolean) =>
     invoke("set_output_mute", { id, muted }),
-  setOutputTarget: (id: number, deviceName: string) =>
-    invoke("set_output_target", { id, deviceName }),
+  setOutputTargets: (id: number, deviceNames: string[]) =>
+    invoke("set_output_targets", { id, deviceNames }),
   listStreams: () => invoke<StreamInfo[]>("list_streams"),
   assignStream: (pwNodeId: number, inputId: number, remember: boolean) =>
     invoke("assign_stream", { pwNodeId, inputId, remember }),

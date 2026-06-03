@@ -155,7 +155,7 @@ color = "#4A90D9"
 id = 5
 name = "Personal Mix"
 color = "#8E44AD"
-target_device = "alsa_output.pci-0000_00_1f.3.analog-stereo"
+target_devices = ["alsa_output.pci-0000_00_1f.3.analog-stereo"]
 
 [[app_rules]]
 app_name = "firefox"

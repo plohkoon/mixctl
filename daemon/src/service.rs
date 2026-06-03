@@ -194,7 +194,7 @@ impl Service {
             color: cfg.color.clone(),
             volume: state.volume,
             muted: state.muted,
-            target_device: cfg.target_device.clone().unwrap_or_default(),
+            target_devices: cfg.target_devices.clone(),
         }
     }
 
@@ -391,7 +391,7 @@ mod tests {
                 id: Some(1),
                 name: "Sys".into(),
                 color: "#000000".into(),
-                target_device: None,
+                target_devices: Vec::new(),
                 capture_device: None,
             }],
             outputs: vec![],
@@ -506,7 +506,7 @@ mod tests {
             id: Some(42),
             name: "TestInput".into(),
             color: "#AABBCC".into(),
-            target_device: None,
+            target_devices: Vec::new(),
             capture_device: None,
         };
         let info = Service::build_input_info(&cfg);
@@ -521,7 +521,7 @@ mod tests {
             id: Some(7),
             name: "MainMix".into(),
             color: "#112233".into(),
-            target_device: Some("alsa_output.usb".into()),
+            target_devices: vec!["alsa_output.usb".into(), "alsa_output.hdmi".into()],
             capture_device: None,
         };
         let state = crate::state::OutputState {
@@ -534,6 +534,6 @@ mod tests {
         assert_eq!(info.color, "#112233");
         assert_eq!(info.volume, 75);
         assert!(info.muted);
-        assert_eq!(info.target_device, "alsa_output.usb");
+        assert_eq!(info.target_devices, vec!["alsa_output.usb", "alsa_output.hdmi"]);
     }
 }

@@ -557,7 +557,7 @@ mod tests {
             id: Some(id),
             name: name.into(),
             color: "#000000".into(),
-            target_device: None,
+            target_devices: Vec::new(),
             capture_device: None,
         }
     }

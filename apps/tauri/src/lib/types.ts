@@ -10,7 +10,7 @@ export interface OutputInfo {
   color: string;
   volume: number;
   muted: boolean;
-  target_device: string;
+  target_devices: string[];
 }
 
 export interface RouteInfo {

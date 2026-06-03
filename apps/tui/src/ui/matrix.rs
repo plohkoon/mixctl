@@ -74,10 +74,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         // Line 2: target device (abbreviated)
         if area.height > 1 {
             let target_area = Rect::new(x, area.y + 1, w, 1);
-            let target = if output.target_device.is_empty() {
-                "(default)".to_string()
-            } else {
-                abbreviate_device(&output.target_device, w as usize)
+            let target = match output.target_devices.len() {
+                0 => "(default)".to_string(),
+                1 => abbreviate_device(&output.target_devices[0], w as usize),
+                n => format!("{} devices", n),
             };
             frame.render_widget(
                 Paragraph::new(target).style(Style::default().fg(Color::DarkGray)),

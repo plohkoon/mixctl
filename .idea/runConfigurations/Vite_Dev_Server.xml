@@ -7,6 +7,7 @@
     </scripts>
     <node-interpreter value="$USER_HOME$/.local/share/fnm/node-versions/v24.14.0/installation/bin/node" />
     <envs />
+    <output_file path="$PROJECT_DIR$/logs/vite.log" is_save="true" />
     <method v="2" />
   </configuration>
 </component>

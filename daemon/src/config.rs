@@ -44,10 +44,55 @@ pub struct ChannelConfig {
     pub id: Option<u32>,
     pub name: String,
     pub color: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_device: Option<String>,
+    /// Hardware playback devices this output is bound to. Multiple devices
+    /// receive the same mix in parallel. Empty = not bound.
+    #[serde(
+        default,
+        alias = "target_device",
+        deserialize_with = "deserialize_target_devices",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub target_devices: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_device: Option<String>,
+}
+
+/// Accept either an array of strings (current) or a single string (legacy
+/// `target_device = "..."` from before multi-device binding).
+fn deserialize_target_devices<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a device name string or an array of device names")
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            if v.is_empty() { Ok(Vec::new()) } else { Ok(vec![v.to_string()]) }
+        }
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Vec<String>, E> {
+            if v.is_empty() { Ok(Vec::new()) } else { Ok(vec![v]) }
+        }
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                if !s.is_empty() { out.push(s); }
+            }
+            Ok(out)
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Vec<String>, E> {
+            Ok(Vec::new())
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Vec<String>, E> {
+            Ok(Vec::new())
+        }
+    }
+    de.deserialize_any(V)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,16 +143,16 @@ impl Default for ConfigFile {
         Self {
             version: 1,
             inputs: vec![
-                ChannelConfig { id: Some(1), name: "System".into(), color: "#4A90D9".into(), target_device: None, capture_device: None },
-                ChannelConfig { id: Some(2), name: "Game".into(), color: "#E74C3C".into(), target_device: None, capture_device: None },
-                ChannelConfig { id: Some(3), name: "Music".into(), color: "#2ECC71".into(), target_device: None, capture_device: None },
-                ChannelConfig { id: Some(4), name: "Chat".into(), color: "#F39C12".into(), target_device: None, capture_device: None },
+                ChannelConfig { id: Some(1), name: "System".into(), color: "#4A90D9".into(), target_devices: Vec::new(), capture_device: None },
+                ChannelConfig { id: Some(2), name: "Game".into(), color: "#E74C3C".into(), target_devices: Vec::new(), capture_device: None },
+                ChannelConfig { id: Some(3), name: "Music".into(), color: "#2ECC71".into(), target_devices: Vec::new(), capture_device: None },
+                ChannelConfig { id: Some(4), name: "Chat".into(), color: "#F39C12".into(), target_devices: Vec::new(), capture_device: None },
             ],
             outputs: vec![
-                ChannelConfig { id: Some(5), name: "Personal Mix".into(), color: "#8E44AD".into(), target_device: None, capture_device: None },
-                ChannelConfig { id: Some(6), name: "Voice Chat Mix".into(), color: "#3498DB".into(), target_device: None, capture_device: None },
-                ChannelConfig { id: Some(7), name: "Audience Mix".into(), color: "#E67E22".into(), target_device: None, capture_device: None },
-                ChannelConfig { id: Some(8), name: "VOD Track".into(), color: "#1ABC9C".into(), target_device: None, capture_device: None },
+                ChannelConfig { id: Some(5), name: "Personal Mix".into(), color: "#8E44AD".into(), target_devices: Vec::new(), capture_device: None },
+                ChannelConfig { id: Some(6), name: "Voice Chat Mix".into(), color: "#3498DB".into(), target_devices: Vec::new(), capture_device: None },
+                ChannelConfig { id: Some(7), name: "Audience Mix".into(), color: "#E67E22".into(), target_devices: Vec::new(), capture_device: None },
+                ChannelConfig { id: Some(8), name: "VOD Track".into(), color: "#1ABC9C".into(), target_devices: Vec::new(), capture_device: None },
             ],
             default_input: Some(1),
             default_output: Some(6),
@@ -257,7 +302,7 @@ mod tests {
             id,
             name: name.into(),
             color: "#000000".into(),
-            target_device: None,
+            target_devices: Vec::new(),
             capture_device: None,
         }
     }
@@ -416,5 +461,38 @@ mod tests {
             tui: Default::default(),
         };
         assert_eq!(config.next_unused_id(), 4);
+    }
+
+    #[test]
+    fn legacy_target_device_string_deserializes_into_target_devices() {
+        let text = r##"
+            version = 1
+            inputs = []
+            [[outputs]]
+            id = 5
+            name = "Mix"
+            color = "#000000"
+            target_device = "alsa_output.usb-Yeti"
+        "##;
+        let cfg: ConfigFile = toml::from_str(text).unwrap();
+        assert_eq!(cfg.outputs[0].target_devices, vec!["alsa_output.usb-Yeti"]);
+    }
+
+    #[test]
+    fn target_devices_array_deserializes() {
+        let text = r##"
+            version = 1
+            inputs = []
+            [[outputs]]
+            id = 5
+            name = "Mix"
+            color = "#000000"
+            target_devices = ["alsa_output.usb-A", "alsa_output.hdmi-B"]
+        "##;
+        let cfg: ConfigFile = toml::from_str(text).unwrap();
+        assert_eq!(
+            cfg.outputs[0].target_devices,
+            vec!["alsa_output.usb-A", "alsa_output.hdmi-B"]
+        );
     }
 }

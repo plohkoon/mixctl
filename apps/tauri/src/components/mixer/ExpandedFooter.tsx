@@ -99,7 +99,7 @@ export default function ExpandedFooter({ onClose }: ExpandedFooterProps) {
             );
           })}
           {playbackDevices.map((device) => {
-            const boundOutput = outputs.find((o) => o.target_device === device.device_name);
+            const boundOutput = outputs.find((o) => o.target_devices.includes(device.device_name));
             return (
               <div
                 key={`pb-${device.pw_node_id}`}

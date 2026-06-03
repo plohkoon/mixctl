@@ -43,7 +43,7 @@ pub trait MixCtl {
     fn set_output_color(&self, id: u32, color: &str) -> zbus::Result<()>;
     fn set_output_volume(&self, id: u32, volume: u8) -> zbus::Result<()>;
     fn set_output_mute(&self, id: u32, muted: bool) -> zbus::Result<()>;
-    fn set_output_target(&self, id: u32, device_name: &str) -> zbus::Result<()>;
+    fn set_output_targets(&self, id: u32, device_names: Vec<String>) -> zbus::Result<()>;
 
     // Routing (per input→output cell)
     fn get_route(&self, input_id: u32, output_id: u32) -> zbus::Result<RouteInfo>;

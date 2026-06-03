@@ -17,7 +17,7 @@ pub struct OutputInfo {
     pub color: String,
     pub volume: u8,
     pub muted: bool,
-    pub target_device: String,
+    pub target_devices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
