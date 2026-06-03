@@ -212,10 +212,10 @@ fn run_pw_loop(
         known_capture_ids: HashSet::new(),
         known_playback_ids: HashSet::new(),
         client_app_names: HashMap::new(),
-        output_target_loopbacks: HashMap::new(),
-        capture_input_bindings: config.capture_inputs.iter()
-            .map(|c| (c.input_id, c.capture_device_name.clone()))
+        output_target_bindings: config.output_targets.iter()
+            .map(|c| (c.output_id, c.device_name.clone()))
             .collect(),
+        capture_input_loopbacks: HashMap::new(),
         shutdown: false,
         level_monitoring: config.broadcast_levels,
         level_listeners: HashMap::new(),
@@ -320,15 +320,15 @@ fn run_pw_loop(
         targets_by_output.entry(cfg.output_id).or_default().push(cfg.device_name.clone());
     }
     for (output_id, devices) in &targets_by_output {
-        apply_output_target_bindings(&state, &context, *output_id, devices);
+        apply_output_target_bindings(&state, *output_id, devices);
     }
 
     // Start routing readiness timer if we have output targets to wait for.
-    // We no longer track per-port `output_target:` link resolution — loopback
-    // modules connect to their targets asynchronously and we just give them a
-    // grace period before we let streams start moving onto mixctl.input.X
-    // sinks. This preserves the original SDAC-protective behavior without
-    // depending on the legacy link-group bookkeeping.
+    // Output→hardware bridges are direct `monitor → playback` links that resolve
+    // once the device's ports appear; we give them a grace period (or until all
+    // bound devices are present, see `try_activate_routing`) before letting
+    // streams move onto mixctl.input.X sinks — preserving the SDAC-protective
+    // deferral.
     {
         let mut s = state.borrow_mut();
         if config.output_targets.is_empty() {
@@ -339,7 +339,7 @@ fn run_pw_loop(
         }
     }
     for cfg in &config.capture_inputs {
-        queue_capture_links(&state, cfg.input_id, &cfg.capture_device_name);
+        apply_capture_input_binding(&state, &context, cfg.input_id, &cfg.capture_device_name);
     }
 
     // Set initial volume matrix
@@ -422,13 +422,20 @@ struct PwState {
     /// only set `application.name` on the Client global, not on the Node,
     /// so we cache it here and resolve via the stream node's `client.id`.
     client_app_names: HashMap<u32, String>,
-    /// Active `module-loopback` instances keyed by (output_id, device_name).
-    /// Each loopback bridges `mixctl.output.{id}` to a hardware target,
-    /// inserting the resampler/downmixer the bare port-to-port wiring used
-    /// to lack. Dropping a value tears the loopback down.
-    output_target_loopbacks: HashMap<(u32, String), LoopbackModule>,
-    /// Desired capture→input bindings (input_id, device_name). Survives device hot-plug.
-    capture_input_bindings: Vec<(u32, String)>,
+    /// Desired output→hardware target bindings (output_id, device_name).
+    /// Output sinks bridge to hardware via direct `monitor → playback` port
+    /// links (re-queued on hot-plug), which keeps the hardware sink inside the
+    /// mixer's graph component so it — not a flaky capture device — anchors the
+    /// clock. Survives device hot-plug.
+    output_target_bindings: Vec<(u32, String)>,
+    /// Active `module-loopback` instances for hardware capture devices, keyed by
+    /// (input_id, device_name). Each one bridges a hardware mic/line-in into
+    /// `mixctl.input.{id}` while keeping that device in its own clock domain, so
+    /// a duplex USB capture clock can't take over the playback graph. The
+    /// loopback reconnects to the device by `node.name` on hot-plug, so this
+    /// also replaces the old per-device re-link bookkeeping. Dropping a value
+    /// tears the loopback down.
+    capture_input_loopbacks: HashMap<(u32, String), LoopbackModule>,
     shutdown: bool,
     level_monitoring: bool,
     level_listeners: HashMap<u32, Box<dyn std::any::Any>>,
@@ -514,8 +521,8 @@ fn try_activate_routing(state: &Rc<RefCell<PwState>>) {
     }
 
     let all_targets_present = s
-        .output_target_loopbacks
-        .keys()
+        .output_target_bindings
+        .iter()
         .all(|(_, device_name)| s.node_name_to_id.contains_key(device_name));
 
     let timed_out = s
@@ -678,57 +685,88 @@ fn queue_filter_to_output_links(state: &Rc<RefCell<PwState>>, output_ids: &[u32]
     }
 }
 
-/// Reconcile the live loopback modules for `output_id` to match `device_names`.
+/// Reconcile the output→hardware bridge for `output_id` to match `device_names`.
 ///
-/// Drops loopbacks for devices that are no longer wanted, loads new ones for
-/// devices that just appeared in the desired set, and leaves unchanged ones
-/// alone. The capture side of each loopback targets `mixctl.output.{output_id}`
-/// and the playback side targets the hardware device by `node.name`;
-/// PipeWire handles reconnection on hot-plug automatically because both sides
-/// are matched by name.
+/// Bridges each `mixctl.output.{output_id}` sink to its hardware target(s) with
+/// direct `monitor → playback` port links. Keeping the hardware sink directly in
+/// the mixer's graph component (rather than behind a `module-loopback`, which is
+/// its own clock domain) means a real DAC anchors the graph's clock instead of a
+/// flaky duplex capture device. Links resolve when the device's ports appear and
+/// are re-queued on hot-plug (see the `Audio/Sink` registry handler).
+///
+/// NOTE: direct links don't resample, so a rate-mismatched device (e.g. the Vive
+/// @ 44.1 kHz) needs `loopback::build_args` instead — not yet wired per-device.
 fn apply_output_target_bindings(
     state: &Rc<RefCell<PwState>>,
-    context: &pw::context::ContextRc,
     output_id: u32,
     device_names: &[String],
 ) {
-    // Drop loopbacks that are no longer in the desired set.
     {
         let mut s = state.borrow_mut();
-        s.output_target_loopbacks
-            .retain(|(id, dev), _| *id != output_id || device_names.iter().any(|d| d == dev));
+        // Replace this output's bindings and tear down its existing target links.
+        s.output_target_bindings.retain(|(id, _)| *id != output_id);
+        for device in device_names {
+            s.output_target_bindings.push((output_id, device.clone()));
+        }
+        remove_link_group(&mut s, &format!("output_target:{output_id}"));
     }
-    // Load new loopbacks for any devices we don't already have.
     for device in device_names {
-        let key = (output_id, device.clone());
-        if state.borrow().output_target_loopbacks.contains_key(&key) {
-            continue;
-        }
-        let args = loopback::build_args(output_id, device, device);
-        match LoopbackModule::load(context, &args) {
-            Some(module) => {
-                state.borrow_mut().output_target_loopbacks.insert(key, module);
-                info!("loaded loopback for output {output_id} → {device}");
-            }
-            None => {
-                error!("failed to load loopback for output {output_id} → {device}");
-            }
-        }
+        queue_output_target_links(state, output_id, device);
     }
+    try_resolve_pending_links(state);
     try_activate_routing(state);
 }
 
-fn queue_capture_links(state: &Rc<RefCell<PwState>>, input_id: u32, capture_device_name: &str) {
+/// Queue direct `mixctl.output.{output_id}:monitor_* → device:playback_*` links.
+/// Stereo hardware only resolves FL/FR; the surround channels stay pending
+/// harmlessly (they have no matching device port).
+fn queue_output_target_links(state: &Rc<RefCell<PwState>>, output_id: u32, device_name: &str) {
     let mut s = state.borrow_mut();
-    s.capture_device_names.insert(input_id, capture_device_name.to_string());
-    for ch in &["FL", "FR"] {
+    for ch in &CHANNELS {
         s.pending_links.push(PendingLink {
-            group: format!("capture:{input_id}"),
-            out_node_name: capture_device_name.to_string(),
-            out_port_name: format!("capture_{ch}"),
-            in_node_name: format!("mixctl.input.{input_id}"),
+            group: format!("output_target:{output_id}"),
+            out_node_name: format!("mixctl.output.{output_id}"),
+            out_port_name: format!("monitor_{ch}"),
+            in_node_name: device_name.to_string(),
             in_port_name: format!("playback_{ch}"),
         });
+    }
+}
+
+/// Bridge a hardware capture device into `mixctl.input.{input_id}` through a
+/// `module-loopback`, the capture-direction mirror of
+/// [`apply_output_target_bindings`]. Using a loopback instead of raw port links
+/// keeps the capture hardware in its own clock domain; raw-linking a duplex USB
+/// device such as the Yeti drags its capture clock into the mixer graph, where
+/// PipeWire elects it driver for the entire playback graph (see
+/// [`loopback::build_capture_args`]). Each input has at most one capture device.
+fn apply_capture_input_binding(
+    state: &Rc<RefCell<PwState>>,
+    context: &pw::context::ContextRc,
+    input_id: u32,
+    capture_device_name: &str,
+) {
+    // Drop any existing capture loopback for this input that targets a
+    // different device (a rebind to a new capture source).
+    {
+        let mut s = state.borrow_mut();
+        s.capture_device_names.insert(input_id, capture_device_name.to_string());
+        s.capture_input_loopbacks
+            .retain(|(id, dev), _| *id != input_id || dev == capture_device_name);
+    }
+    let key = (input_id, capture_device_name.to_string());
+    if state.borrow().capture_input_loopbacks.contains_key(&key) {
+        return;
+    }
+    let args = loopback::build_capture_args(input_id, capture_device_name, capture_device_name);
+    match LoopbackModule::load(context, &args) {
+        Some(module) => {
+            state.borrow_mut().capture_input_loopbacks.insert(key, module);
+            info!("loaded capture loopback for input {input_id} ← {capture_device_name}");
+        }
+        None => {
+            error!("failed to load capture loopback for input {input_id} ← {capture_device_name}");
+        }
     }
 }
 
@@ -910,22 +948,15 @@ fn handle_node_global(
                 .unwrap_or(node_name)
                 .to_string();
             let device_name_str = node_name.to_string();
-            let mut s = state.borrow_mut();
-            s.known_capture_ids.insert(global.id);
-            s.node_name_to_id.insert(device_name_str.clone(), global.id);
-            // Re-bind any capture inputs that want this device
-            let rebinds: Vec<u32> = s.capture_input_bindings.iter()
-                .filter(|(_, dev)| *dev == device_name_str)
-                .map(|(id, _)| *id)
-                .collect();
-            for input_id in &rebinds {
-                remove_link_group(&mut s, &format!("capture:{input_id}"));
+            {
+                let mut s = state.borrow_mut();
+                s.known_capture_ids.insert(global.id);
+                s.node_name_to_id.insert(device_name_str.clone(), global.id);
             }
-            drop(s);
-            for input_id in rebinds {
-                info!("re-binding capture input {input_id} to reappeared device {device_name_str}");
-                queue_capture_links(state, input_id, &device_name_str);
-            }
+            // Capture devices are bridged into input sinks via `module-loopback`
+            // (see `apply_capture_input_binding`); the loopback reconnects to the
+            // device by `node.name` automatically on hot-plug, so there's no
+            // manual re-link to do here.
             event_sender.send(PwEvent::CaptureDeviceAppeared {
                 pw_node_id: global.id,
                 name,
@@ -940,13 +971,31 @@ fn handle_node_global(
                 .unwrap_or(node_name)
                 .to_string();
             let device_name_str = node_name.to_string();
-            {
+            // Re-bind any outputs targeting this (re)appeared device by re-queuing
+            // their direct monitor→playback links.
+            let rebinds: Vec<u32> = {
                 let mut s = state.borrow_mut();
                 s.known_playback_ids.insert(global.id);
                 s.node_name_to_id.insert(device_name_str.clone(), global.id);
+                let outs: Vec<u32> = s.output_target_bindings.iter()
+                    .filter(|(_, dev)| *dev == device_name_str)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for output_id in &outs {
+                    remove_link_group(&mut s, &format!("output_target:{output_id}"));
+                }
+                outs
+            };
+            for output_id in rebinds {
+                info!("re-binding output {output_id} to reappeared device {device_name_str}");
+                let devices: Vec<String> = state.borrow().output_target_bindings.iter()
+                    .filter(|(id, _)| *id == output_id)
+                    .map(|(_, dev)| dev.clone())
+                    .collect();
+                for device in devices {
+                    queue_output_target_links(state, output_id, &device);
+                }
             }
-            // Output-target loopback modules reconnect to the device by name
-            // on their own — no manual link rebind needed here.
             event_sender.send(PwEvent::PlaybackDeviceAppeared {
                 pw_node_id: global.id,
                 name,
@@ -1033,7 +1082,10 @@ fn handle_command(
         PwCommand::DestroyInputSink { input_id } => {
             let mut s = state.borrow_mut();
             remove_link_group(&mut s, &format!("input_to_filter:{input_id}"));
-            remove_link_group(&mut s, &format!("capture:{input_id}"));
+            // Tear down the capture loopback bridging this input's hardware
+            // source (if any); the module holds the mic open and targets the
+            // sink we're about to destroy.
+            s.capture_input_loopbacks.retain(|(id, _), _| *id != input_id);
             s.capture_device_names.remove(&input_id);
             if let Some(&iidx) = s.input_id_to_idx.get(&input_id) {
                 for oidx in 0..s.output_id_to_idx.len() {
@@ -1085,7 +1137,8 @@ fn handle_command(
         PwCommand::DestroyOutputSink { output_id } => {
             let mut s = state.borrow_mut();
             remove_link_group(&mut s, &format!("filter_to_output:{output_id}"));
-            s.output_target_loopbacks.retain(|(id, _), _| *id != output_id);
+            remove_link_group(&mut s, &format!("output_target:{output_id}"));
+            s.output_target_bindings.retain(|(id, _)| *id != output_id);
             if let Some(&oidx) = s.output_id_to_idx.get(&output_id) {
                 for iidx in 0..s.input_id_to_idx.len() {
                     s.volume_matrix.set(iidx, oidx, 0.0);
@@ -1139,7 +1192,7 @@ fn handle_command(
         }
 
         PwCommand::SetOutputTargets { output_id, device_names } => {
-            apply_output_target_bindings(state, context, output_id, &device_names);
+            apply_output_target_bindings(state, output_id, &device_names);
         }
 
         PwCommand::MoveStream { pw_node_id, input_id } => {
@@ -1156,25 +1209,18 @@ fn handle_command(
         PwCommand::CreateCaptureInput { input_id, description, capture_device_name } => {
             create_input_sink(state, event_sender, core, input_id, &description);
             queue_input_to_filter_links(state, &[input_id]);
-            queue_capture_links(state, input_id, &capture_device_name);
             try_resolve_pending_links(state);
+            apply_capture_input_binding(state, context, input_id, &capture_device_name);
         }
 
         PwCommand::BindCaptureToInput { input_id, capture_device_name } => {
-            {
-                let mut s = state.borrow_mut();
-                s.capture_input_bindings.retain(|(id, _)| *id != input_id);
-                s.capture_input_bindings.push((input_id, capture_device_name.clone()));
-            }
-            queue_capture_links(state, input_id, &capture_device_name);
-            try_resolve_pending_links(state);
+            apply_capture_input_binding(state, context, input_id, &capture_device_name);
         }
 
         PwCommand::DestroyCaptureLoopback { input_id } => {
             let mut s = state.borrow_mut();
-            remove_link_group(&mut s, &format!("capture:{input_id}"));
+            s.capture_input_loopbacks.retain(|(id, _), _| *id != input_id);
             s.capture_device_names.remove(&input_id);
-            s.capture_input_bindings.retain(|(id, _)| *id != input_id);
         }
 
         PwCommand::SetCaptureVolume { input_id, pw_volume } => {
@@ -1362,10 +1408,11 @@ fn cleanup_before_shutdown(
     s.active_links.clear();
     s.pending_links.clear();
     s.mixer = None;
+    s.capture_input_loopbacks.clear();
     s.input_sinks.clear();
 
-    // Step 5: Tear down output→hardware loopbacks and output sinks.
-    s.output_target_loopbacks.clear();
+    // Step 5: Tear down output→hardware bindings and output sinks.
+    s.output_target_bindings.clear();
     s.output_sinks.clear();
     s.core = None;
     info!("PipeWire cleanup complete");
